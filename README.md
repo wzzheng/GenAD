@@ -4,9 +4,9 @@
 
 > GenAD: Generative End-to-End Autonomous Driving
 
-> [Wenzhao Zheng](https://wzzheng.net/)\*, Ruiqi Song\*, [Xianda Guo](https://scholar.google.com/citations?user=jPvOqgYAAAAJ)\* $\ddagger$, [Long Chen](https://scholar.google.com/citations?user=jzvXnkcAAAAJ)$\ddagger$
+> [Wenzhao Zheng](https://wzzheng.net/)\*, Ruiqi Song\*, [Xianda Guo](https://scholar.google.com/citations?user=jPvOqgYAAAAJ)\* $\dagger$, [Long Chen](https://scholar.google.com/citations?user=jzvXnkcAAAAJ)$\dagger$
 
-\* Equal contributions $\ddagger$ Corresponding authors
+\* Equal contributions $\dagger$ Corresponding authors
 
 **GenAD casts autonomous driving as a generative modeling problem.**
 
