@@ -84,6 +84,8 @@ Detailed package versions can be found in [requirements.txt](../requirements.txt
 
 ### Getting Started
 
+#### Open-Loop Evaluation
+
 **datasets**
 
 https://drive.google.com/drive/folders/1gy7Ux-bk0sge77CsGgeEzPF9ImVn-WgJ?usp=drive_link
@@ -108,7 +110,11 @@ conda activate genad
 CUDA_VISIBLE_DEVICES=0 python tools/test.py projects/configs/VAD/GenAD_config.py /path/to/ckpt.pth --launcher none --eval bbox --tmpdir outputs
 ```
 
+#### Closed-Loop Evaluation
 
+The closed-loop evaluation can be found at this repository
+
+https://github.com/XiandaGuo/GenADv2
 
 ## Related Projects
 
