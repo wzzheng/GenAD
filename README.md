@@ -12,6 +12,7 @@
 
 ## News 
 
+- **[2024/11/10]** Closed-loop code for [GenAD](https://github.com/wzzheng/GenAD) has been released.
 - **[2024/5/2]** Training and evaluation code release.
 - **[2024/2/18]** Paper released on [arXiv](https://arxiv.org/pdf/2402.11502).
 
@@ -25,11 +26,29 @@
 
 **Comparisons of the proposed generative end-to-end autonomous driving framework with the conventional pipeline.** Most existing methods follow a serial design of perception, prediction, and planning. They usually ignore the high-level interactions between the ego car and other agents and the structural prior of realistic trajectories. We model autonomous driving as a future generation problem and conduct motion prediction and ego planning simultaneously in a structural latent trajectory space.
 
+### Closed-Loop Autonomous Driving
+
+![vis](./assets/carla.png)
+
+Bench2Drive comprises the [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive) repository for closed-loop evaluation and the model repository [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo/tree/uniad/vad). The code in this repository integrates GenAD within the Bench2DriveZoo repository, with the majority of the code being identical to that in Bench2DriveZoo. This repository does not contain the code from the Bench2Drive repository, and no modifications were made to the closed-loop evaluation code. Only the execution scripts were adjusted, as detailed in the following description.
+
 ## Results
+
+### Open-Loop Setting on nuScenes
 
 ![results](./assets/results.png)
 
-## Code 
+### Closed-Loop Setting on Carla
+
+|       Method        | Driving Score | Success Rates (%) |
+| :-----------------: | :-----------: | :---------------: |
+|     VAD (Paper)     |     39.42     |        0.1        |
+| VAD (Github Update) |     42.35     |       0.13        |
+| VAD (Reproduction)  |     38.16     |       0.15        |
+|      **GenAD**      |   **44.81**   |     **0.159**     |
+
+## Open-Loop Code 
+
 ### Dataset
 
 Download nuScenes V1.0 full dataset data and CAN bus expansion data [HERE](https://www.nuscenes.org/download). Prepare nuscenes data as follows.
@@ -76,13 +95,11 @@ GenAD
 |   |   ├── genad_nuscenes_infos_val.pkl
 ```
 
-### installation
+### Installation
 
 Detailed package versions can be found in [requirements.txt](../requirements.txt).
 
 - [Installation](docs/install.md)
-
-### Getting Started
 
 #### Open-Loop Evaluation
 
@@ -110,15 +127,50 @@ conda activate genad
 CUDA_VISIBLE_DEVICES=0 python tools/test.py projects/configs/VAD/GenAD_config.py /path/to/ckpt.pth --launcher none --eval bbox --tmpdir outputs
 ```
 
-#### Closed-Loop Evaluation
+## Closed-Loop Code
 
-The closed-loop evaluation can be found at this repository
+### Installation
 
-https://github.com/XiandaGuo/GenADv2
+Clone this repository and configure it according to the *Getting Started* section in the [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo/tree/uniad/vad) repository documentation. Refer to the configuration documentation in the [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive)  repository to link this repository to the closed-loop evaluation repository.
+
+Detailed package versions can be found in [requirements.txt](../requirements.txt).
+
+
+### Training
+
+``` 
+sh ./adzoo/genad/dist_train.sh ./adzoo/genad/configs/VAD/GenAD_config_b2d.py 1
+```
+
+**Note:** Detailed training and evaluation methods can be found in the documentation of [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo/tree/uniad/vad).
+
+### Open-Loop Evaluation
+
+```
+sh ./adzoo/genad/dist_test.sh ./adzoo/genad/configs/VAD/GenAD_config_b2d.py ./work_dirs/GenAD_config_b2d/epoch_.pth 1
+```
+
+### Closed-Loop Evaluation
+
+Eval GenAD with 8 GPUs
+
+```shell
+leaderboard/scripts/run_evaluation_multi.sh
+```
+
+Eval GenAD with 1 GPU
+
+```shell
+leaderboard/scripts/run_evaluation_debug.sh
+```
+
+**Note:** Detailed training and evaluation methods can be found in the documentation of [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo/tree/uniad/vad).
 
 ## Related Projects
 
 Our code is based on [VAD](https://github.com/hustvl/VAD) and [UniAD](https://github.com/OpenDriveLab/UniAD). 
+
+Closed-loop code is based on [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo).
 
 ## Citation
 
