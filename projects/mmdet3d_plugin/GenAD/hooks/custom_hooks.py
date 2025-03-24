@@ -2,6 +2,10 @@ from mmcv.runner.hooks.hook import HOOKS, Hook
 from projects.mmdet3d_plugin.models.utils import run_time
 from mmcv.parallel import is_module_wrapper
 
+import os
+import mmcv
+import torch
+import copy
 
 @HOOKS.register_module()
 class TransferWeight(Hook):

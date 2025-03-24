@@ -64,6 +64,7 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     have_mask = False
     for i, data in enumerate(data_loader):
         with torch.no_grad():
+            #  return_loss=False和rescale=True，表示执行推理模式而非训练模式。
             result = model(return_loss=False, rescale=True, **data)
             # encode mask results
             if isinstance(result, dict):

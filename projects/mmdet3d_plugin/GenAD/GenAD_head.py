@@ -27,6 +27,15 @@ from projects.mmdet3d_plugin.GenAD.utils.map_utils import (
 from projects.mmdet3d_plugin.GenAD.generator import DistributionModule, PredictModel
 from projects.mmdet3d_plugin.GenAD.generator import FuturePrediction
 
+import os
+import json
+import numpy as np
+import re
+import random
+from datetime import datetime
+import matplotlib.pyplot as plt
+import math
+import wandb
 
 class MLP(nn.Module):
     def __init__(self, in_channels, hidden_unit, verbose=False):
@@ -177,6 +186,30 @@ class GenADHead(DETRHead):
         self.valid_fut_ts = valid_fut_ts
         self.agent_dim = agent_dim
         self.with_cur = True
+
+        # 初始化偏移相关属性
+        self.shift_log = []
+        self.scene_shifts = {}
+        self.shift_file = os.path.join('/mnt/kuebiko/users/qdeng/GenAD', 'scene_shifts.json')
+        self.shift_rng = np.random.RandomState(42)  # 固定种子确保可重复性
+        
+        self.visualization_counter = 0
+        self.save_data_freq = 1  # 保存数据的频率
+        self.visualize_freq = 1
+
+        # if not hasattr(wandb, 'run') or wandb.run is None:
+        #     wandb.init(
+        #         project="GenAD-LateralShift",
+        #         config={
+        #             "fut_ts": fut_ts,
+        #             "fut_mode": fut_mode,
+        #             "map_thresh": map_thresh,
+        #             "dis_thresh": dis_thresh,
+        #             "valid_fut_ts": valid_fut_ts,
+        #         },
+        #         name=f"GenAD-LateralShift-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        #     )
+        # self.wandb_initialized = True
 
         if loss_traj_cls['use_sigmoid'] == True:
             self.traj_num_cls = 1
@@ -512,6 +545,823 @@ class GenADHead(DETRHead):
 
         # @auto_fp16(apply_to=('mlvl_feats'))
 
+    def se2_transform(self, x, T):
+        """SE(2) transformation of BEV features
+        Args:
+            x: 输入特征，可以是bev_mask/bev_pos/bev_embed等
+            T: SE(2)变换矩阵，shape为[batch_size, 3]，包含[dx, dy, dtheta]
+        """
+        device = x.device
+        
+        # 特殊处理bev_embed的情况
+        if len(x.shape) == 3 and x.shape[0] == self.bev_h * self.bev_w:  # bev_embed case [H*W, B, C]
+            L, B, C = x.shape
+            H = W = int(math.sqrt(L))
+
+            # 使用clone()创建新的tensor，避免原地操作
+            x_transformed = x.clone()
+            # reshape to [B, C, H, W]
+            x_4d = x_transformed.permute(1, 2, 0).reshape(B, C, H, W)
+                
+            # 进行网格坐标生成和变换
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(0, H-1, H, device=device),
+                torch.linspace(0, W-1, W, device=device)
+            )
+            grid_x = (grid_x - W/2) * (self.real_w / W)
+            grid_y = (grid_y - H/2) * (self.real_h / H)
+
+            transformed_x = torch.zeros_like(x_4d)
+            # 应用SE(2)变换
+            for b in range(B):
+                dx, dy, dtheta = T[b]
+                # 旋转变换
+                rot_x = grid_x * torch.cos(dtheta) - grid_y * torch.sin(dtheta)
+                rot_y = grid_x * torch.sin(dtheta) + grid_y * torch.cos(dtheta)
+                # 平移变换 
+                trans_x = rot_x + dx
+                trans_y = rot_y + dy
+                
+                # 转回网格坐标
+                trans_x = (trans_x / (self.real_w / W)) + W/2
+                trans_y = (trans_y / (self.real_h / H)) + H/2
+                
+                # 准备grid_sample的输入
+                grid = torch.stack([
+                    2 * trans_x / (W-1) - 1,
+                    2 * trans_y / (H-1) - 1
+                ], dim=-1).unsqueeze(0)  # [1, H, W, 2]
+                
+                # 应用变换
+                transformed_x[b:b+1] = F.grid_sample(
+                    x_4d[b:b+1],
+                    grid,
+                    mode='bilinear',
+                    padding_mode='zeros'
+                )
+                
+            # 变换回原始形状 [H*W, B, C]，避免原地操作
+            result = transformed_x.reshape(B, C, -1).permute(2, 0, 1).contiguous()
+            return result
+            
+        # 原有的处理逻辑保持不变
+        elif len(x.shape) == 3:  # bev_mask case [B, H, W]
+            B, H, W = x.shape
+            x_transformed = x.clone()
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(0, H-1, H, device=device),
+                torch.linspace(0, W-1, W, device=device)
+            )
+            grid_x = (grid_x - W/2) * (self.real_w / W)
+            grid_y = (grid_y - H/2) * (self.real_h / H)
+            
+        elif len(x.shape) == 4:  # bev_pos case [B, C, H, W]
+            B, C, H, W = x.shape
+            x_transformed = x.clone()
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(0, H-1, H, device=device),
+                torch.linspace(0, W-1, W, device=device)
+            )
+            grid_x = (grid_x - W/2) * (self.real_w / W)
+            grid_y = (grid_y - H/2) * (self.real_h / H)
+        
+        transformed = torch.zeros_like(x_transformed)
+        # 应用SE(2)变换
+        for b in range(B):
+            dx, dy, dtheta = T[b]
+            rot_x = grid_x * torch.cos(dtheta) - grid_y * torch.sin(dtheta)
+            rot_y = grid_x * torch.sin(dtheta) + grid_y * torch.cos(dtheta)
+            trans_x = rot_x + dx
+            trans_y = rot_y + dy
+            
+            trans_x = (trans_x / (self.real_w / W)) + W/2
+            trans_y = (trans_y / (self.real_h / H)) + H/2
+            
+            grid = torch.stack([
+                2 * trans_x / (W-1) - 1,
+                2 * trans_y / (H-1) - 1
+            ], dim=-1).unsqueeze(0)
+            
+            if len(x.shape) == 3:
+                transformed[b:b+1] = F.grid_sample(
+                    x_transformed[b:b+1].unsqueeze(1),
+                    grid,
+                    mode='bilinear',
+                    padding_mode='zeros'
+                ).squeeze(1)
+            elif len(x.shape) == 4:
+                transformed[b:b+1] = F.grid_sample(
+                    x_transformed[b:b+1],
+                    grid,
+                    mode='bilinear',
+                    padding_mode='zeros'
+                )
+                
+        return transformed
+    
+    def improved_se2_transform(self, x, T, padding_mode='reflection'):
+        """改进的SE(2)变换函数，保持自车在BEV中心，并处理超出边界的区域
+        
+        Args:
+            x: 输入特征，可以是bev_mask/bev_pos/bev_embed等
+            T: SE(2)变换矩阵，shape为[batch_size, 3]，包含[dx, dy, dtheta]
+            padding_mode: 填充模式，可选'zeros', 'replicate', 'reflection', 'edge_mask'
+            
+        Returns:
+            变换后的特征
+        """
+        device = x.device
+        
+        # 特殊处理bev_embed的情况
+        if len(x.shape) == 3 and x.shape[0] == self.bev_h * self.bev_w:  # bev_embed case [H*W, B, C]
+            L, B, C = x.shape
+            H = W = int(math.sqrt(L))
+
+            # 使用clone()创建新的tensor，避免原地操作
+            x_transformed = x.clone()
+            # reshape to [B, C, H, W]
+            x_4d = x_transformed.permute(1, 2, 0).reshape(B, C, H, W)
+                
+            # 进行网格坐标生成
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(0, H-1, H, device=device),
+                torch.linspace(0, W-1, W, device=device)
+            )
+            grid_x = (grid_x - W/2) * (self.real_w / W)  # 转换到实际坐标系
+            grid_y = (grid_y - H/2) * (self.real_h / H)  # 转换到实际坐标系
+
+            transformed_x = torch.zeros_like(x_4d)
+            edge_masks = []  # 用于存储边缘掩码（如果需要）
+            
+            # 对每个batch样本进行处理
+            for b in range(B):
+                dx, dy, dtheta = T[b]
+                
+                # 直接使用原始的dx值，不取反
+                # 这样做的效果是：移动BEV特征来模拟自车的偏移，而不是移动场景
+                    
+                # 旋转变换
+                rot_x = grid_x * torch.cos(dtheta) - grid_y * torch.sin(dtheta)
+                rot_y = grid_x * torch.sin(dtheta) + grid_y * torch.cos(dtheta)
+                
+                # 平移变换
+                trans_x = rot_x + dx
+                trans_y = rot_y + dy
+                
+                # 转回网格坐标
+                trans_x = (trans_x / (self.real_w / W)) + W/2
+                trans_y = (trans_y / (self.real_h / H)) + H/2
+                
+                # 准备grid_sample的输入
+                grid = torch.stack([
+                    2 * trans_x / (W-1) - 1,
+                    2 * trans_y / (H-1) - 1
+                ], dim=-1).unsqueeze(0)  # [1, H, W, 2]
+                
+                # 创建边缘掩码（如果需要）
+                if padding_mode == 'edge_mask':
+                    # 计算哪些点会超出原始边界
+                    edge_mask = (trans_x < 0) | (trans_x >= W) | (trans_y < 0) | (trans_y >= H)
+                    edge_mask = edge_mask.float().unsqueeze(0)
+                    edge_masks.append(edge_mask)
+                    # 使用replicate模式填充，后续会应用掩码
+                    curr_padding_mode = 'replicate'
+                else:
+                    curr_padding_mode = padding_mode
+                
+                # 应用变换
+                transformed_x[b:b+1] = F.grid_sample(
+                    x_4d[b:b+1],
+                    grid,
+                    mode='bilinear',
+                    padding_mode=curr_padding_mode,
+                    align_corners=False
+                )
+                
+            # 如果使用边缘掩码，将填充区域设为特定值
+            if padding_mode == 'edge_mask':
+                edge_mask = torch.stack(edge_masks, dim=0)  # [B, 1, H, W]
+                # 为填充区域使用一个特殊的标记值
+                # 通常选择一个极端值，如接近零或负值
+                fill_value = 0.0  # 可以根据需要调整
+                transformed_x = transformed_x * (1 - edge_mask) + fill_value * edge_mask
+            
+            # 变换回原始形状 [H*W, B, C]
+            result = transformed_x.reshape(B, C, -1).permute(2, 0, 1).contiguous()
+            return result
+            
+        # 处理其他维度的输入（保持与之前代码的兼容性）
+        elif len(x.shape) == 3:  # bev_mask case [B, H, W]
+            B, H, W = x.shape
+            x_transformed = x.clone()
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(0, H-1, H, device=device),
+                torch.linspace(0, W-1, W, device=device)
+            )
+            grid_x = (grid_x - W/2) * (self.real_w / W)
+            grid_y = (grid_y - H/2) * (self.real_h / H)
+            
+        elif len(x.shape) == 4:  # bev_pos case [B, C, H, W]
+            B, C, H, W = x.shape
+            x_transformed = x.clone()
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(0, H-1, H, device=device),
+                torch.linspace(0, W-1, W, device=device)
+            )
+            grid_x = (grid_x - W/2) * (self.real_w / W)
+            grid_y = (grid_y - H/2) * (self.real_h / H)
+        
+        transformed = torch.zeros_like(x_transformed)
+        edge_masks = []  # 用于存储边缘掩码（如果需要）
+        
+        # 对每个batch样本进行处理
+        for b in range(B):
+            dx, dy, dtheta = T[b]
+            
+            # 旋转变换
+            rot_x = grid_x * torch.cos(dtheta) - grid_y * torch.sin(dtheta)
+            rot_y = grid_x * torch.sin(dtheta) + grid_y * torch.cos(dtheta)
+            
+            # 平移变换
+            trans_x = rot_x + dx
+            trans_y = rot_y + dy
+            
+            # 转回网格坐标
+            trans_x = (trans_x / (self.real_w / W)) + W/2
+            trans_y = (trans_y / (self.real_h / H)) + H/2
+            
+            # 准备grid_sample的输入
+            grid = torch.stack([
+                2 * trans_x / (W-1) - 1,
+                2 * trans_y / (H-1) - 1
+            ], dim=-1).unsqueeze(0)  # [1, H, W, 2]
+            
+            # 创建边缘掩码（如果需要）
+            if padding_mode == 'edge_mask':
+                # 计算哪些点会超出原始边界
+                edge_mask = (trans_x < 0) | (trans_x >= W) | (trans_y < 0) | (trans_y >= H)
+                edge_mask = edge_mask.float().unsqueeze(0)
+                edge_masks.append(edge_mask)
+                # 使用replicate模式填充，后续会应用掩码
+                curr_padding_mode = 'replicate'
+            else:
+                curr_padding_mode = padding_mode
+            
+            # 应用变换
+            if len(x.shape) == 3:
+                transformed[b:b+1] = F.grid_sample(
+                    x_transformed[b:b+1].unsqueeze(1),
+                    grid,
+                    mode='bilinear',
+                    padding_mode=curr_padding_mode,
+                    align_corners=False
+                ).squeeze(1)
+            elif len(x.shape) == 4:
+                transformed[b:b+1] = F.grid_sample(
+                    x_transformed[b:b+1],
+                    grid,
+                    mode='bilinear',
+                    padding_mode=curr_padding_mode,
+                    align_corners=False
+                )
+        
+        # 如果使用边缘掩码，将填充区域设为特定值
+        if padding_mode == 'edge_mask':
+            edge_mask = torch.stack(edge_masks, dim=0)  # [B, 1, H, W]
+            if len(x.shape) == 3:
+                edge_mask = edge_mask.squeeze(1)
+            # 为填充区域使用一个特殊的标记值
+            fill_value = 0.0  # 可以根据需要调整
+            transformed = transformed * (1 - edge_mask) + fill_value * edge_mask
+        
+        return transformed
+
+    def save_shift_log(self):
+        """保存记录的偏移量数据"""
+        
+        # 创建保存目录
+        save_dir = '/mnt/kuebiko/users/qdeng/GenAD/lateral_shift_logs_pretrained'
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 生成文件名，包含时间戳以避免覆盖
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        shift_data = {
+                #  JSON 不能直接序列化 NumPy 数组，需要在保存之前将 NumPy 数组转换为普通的 Python 列表。
+                'shifts': [{
+                    'lateral_shift': info['lateral_shift'].tolist(),  # 转换为列表
+                    'timestamp': info['timestamp'],
+                    'scene_token': info['scene_token'],
+                    'sample_idx': info['sample_idx']
+                } for info in self.shift_log],            
+                'parameters': {
+                'mean': 0.0,
+                'std': 1.0,
+                # 'random_seed': 42
+            }
+        }
+        
+        # 保存为NPZ文件（如果主要是数值数据）
+        save_path_npz = os.path.join(save_dir, f'lateral_shifts_{timestamp}.npz')
+        lateral_shifts = np.array([info['lateral_shift'] for info in self.shift_log])
+        timestamps = np.array([info['timestamp'] for info in self.shift_log])
+        scene_tokens = np.array([info['scene_token'] for info in self.shift_log])
+        sample_idxs = np.array([info['sample_idx'] for info in self.shift_log])
+        
+        np.savez(save_path_npz,
+                lateral_shifts=lateral_shifts,
+                timestamps=timestamps,
+                scene_tokens=scene_tokens,
+                sample_idxs=sample_idxs,
+                mean=0.0,
+                std=1.0)
+        
+        # 同时保存一个JSON文件，包含更多可读信息
+        save_path_json = os.path.join(save_dir, f'lateral_shifts_{timestamp}.json')
+        with open(save_path_json, 'w') as f:
+            json.dump(shift_data, f, indent=4)
+        
+        # 清空列表，防止内存占用过大
+        self.shift_log = []
+        
+        print(f"Saved shift log to {save_path_npz} and {save_path_json}")
+
+    # 析构方法
+    def __del__(self):
+        """在对象被销毁时保存剩余的数据,关闭wandb"""
+        if hasattr(self, 'shift_log') and self.shift_log:
+            self.save_shift_log()
+            wandb.finish()
+
+    def plan_recovery_trajectory(self, lateral_shift, ego_fut_trajs=None, lookahead_distance=3.0, num_points=40, dt=0.1, wheelbase=2.7):
+        """使用Pure Pursuit算法计算从横向偏移位置恢复到原始轨迹的路径
+        
+        Args:
+            lateral_shift (Tensor): 横向偏移量，形状为 [batch_size]
+            ego_fut_trajs (Tensor): 真实的未来轨迹，用作参考路径
+            lookahead_distance (float): 前视距离，用于Pure Pursuit算法
+            num_points (int): 生成的轨迹点数量
+            dt (float): 时间步长，用于模拟
+            wheelbase (float): 车辆轴距，用于Ackerman模型
+            
+        Returns:
+            Tensor: 恢复轨迹，形状为 [batch_size, num_points, 2]，每个点包含 [x, y] 坐标
+        """
+        device = lateral_shift.device
+        batch_size = lateral_shift.shape[0]
+
+        # 初始化恢复轨迹
+        trajectories = torch.zeros((batch_size, num_points, 2), device=device)
+        
+        # 初始状态：偏移位置在y轴（前向）为0，x轴（横向）为lateral_shift
+        # 车辆初始朝向为正前方（y轴正方向）
+        for b in range(batch_size):
+            # 获取参考路径 - 使用ego_fut_trajs的第一个模态(最可能的轨迹)
+            if ego_fut_trajs is not None and ego_fut_trajs.shape[1] > 0:
+                ref_path = ego_fut_trajs[b, 0, :, :].cpu().numpy()  # [future_length, 2]
+            else:
+                # 如果没有提供未来轨迹，则使用默认的垂直线作为参考
+                ref_path = np.array([[0, i] for i in range(10)])
+
+            x = lateral_shift[b].item()  # 初始x位置（横向偏移）
+            y = 0.0                      # 初始y位置
+            theta = 0.0                  # 初始朝向角（弧度）
+            v = 5.0                      # 初始速度 (m/s)
+            
+            for i in range(num_points):
+                # 记录当前位置
+                trajectories[b, i, 0] = x
+                trajectories[b, i, 1] = y
+                
+                # 在参考路径上找到最近点的索引
+                distances = np.sqrt(np.sum(np.square(ref_path - np.array([x, y])), axis=1))
+                closest_idx = np.argmin(distances)
+
+                # 确定前视点索引（沿参考路径向前看）
+                lookahead_idx = closest_idx
+                accumulated_distance = 0
+
+                # 沿参考路径寻找满足前视距离的点
+                while lookahead_idx + 1 < len(ref_path) and accumulated_distance < lookahead_distance:
+                    next_idx = lookahead_idx + 1
+                    segment_distance = np.sqrt(np.sum(np.square(ref_path[next_idx] - ref_path[lookahead_idx])))
+                    accumulated_distance += segment_distance
+                    lookahead_idx = next_idx
+
+                # 确保不超出范围
+                lookahead_idx = min(lookahead_idx, len(ref_path) - 1)
+
+                # 获取目标点（前视点）
+                target_x, target_y = ref_path[lookahead_idx]
+                
+                # # 如果目标点会导致车辆向后行驶，则选择一个向前的目标点
+                # if target_y < y:  # 如果目标点在当前位置的后方
+                #     # 选择在当前位置正前方的点作为目标
+                #     target_y = y + lookahead_distance
+                #     # 保持横向位置不变或向中心线靠拢
+                #     target_x = x * 0.8  # 逐渐向中心线靠拢
+
+                # 计算当前位置到目标点的向量
+                dx = target_x - x
+                dy = target_y - y
+                
+                # 计算目标点在车体坐标系中的位置
+                target_distance = math.sqrt(dx**2 + dy**2)
+                
+                # 坐标转换到车体坐标系
+                dx_body = dx * math.cos(-theta) - dy * math.sin(-theta)
+                dy_body = dx * math.sin(-theta) + dy * math.cos(-theta)
+                
+                # 计算曲率 (Pure Pursuit核心)
+                if target_distance < 1e-6 or abs(dy_body) < 1e-6:
+                    curvature = 0.0
+                else:
+                    curvature = 2 * dx_body / (target_distance**2)
+                
+                # =====  简化的ackerman模型  ===== #
+                # 计算转向角 (Ackerman模型)
+                steering = math.atan(wheelbase * curvature)
+
+                # 限制转向角的范围，防止过度转向
+                max_steering = math.radians(30)  # 最大转向角为30度
+                steering = max(min(steering, max_steering), -max_steering)
+                
+                # 确保车辆向前移动 - 如果y方向速度可能为负，则调整转向角
+                # 预测下一步的朝向
+                predicted_theta = theta + v * dt * math.tan(steering) / wheelbase
+                # 检查该朝向下y方向的速度分量
+                predicted_vy = v * math.cos(predicted_theta)
+
+                if predicted_vy < 0:  # 如果预测的y方向速度为负（向后行驶）
+                    # 强制将转向角调整到保证向前运动的值
+                    if x > 0:  # 如果在中心线右侧
+                        steering = -max_steering  # 向左转
+                    else:  # 如果在中心线左侧
+                        steering = max_steering  # 向右转
+
+                # 更新位置和朝向（简化的运动学模型--Bicycle Model）
+                x = x + v * dt * math.sin(theta)
+                y = y + v * dt * math.cos(theta)
+                theta = theta + v * dt * math.tan(steering) / wheelbase
+                # =====  简化的ackerman模型  ===== #
+
+                # # =====  完整的Ackerman模型  ===== #
+                # # 计算Ackerman转向角 - 这是对中线的转向角
+                # steering_center = math.atan(wheelbase * curvature)
+                
+                # # 限制转向角的范围
+                # max_steering = math.radians(30)  # 最大转向角为30度
+                # steering_center = max(min(steering_center, max_steering), -max_steering)
+                
+                # # Ackerman几何下，内外轮转向角度不同
+                # # 计算转向方向
+                # turning_right = steering_center < 0
+                # turning_left = steering_center > 0
+                
+                # # 确保车辆向前移动 - 检查下一步的朝向是否会导致向后运动
+                # next_theta = theta + v * dt * math.tan(steering_center) / wheelbase
+                # # 在新朝向下，检查y方向速度分量
+                # vy_next = v * math.cos(next_theta)
+                
+                # if vy_next < 0:  # 如果会导致向后运动
+                #     # 调整转向角使车辆转向中心线
+                #     if x > 0:  # 如果在中心线右侧
+                #         steering_center = -max_steering  # 向左转
+                #     else:
+                #         steering_center = max_steering   # 向右转
+                    
+                #     # 重新计算内外轮转向角
+                #     turning_right = steering_center < 0
+                #     turning_left = steering_center > 0
+                
+                # # 使用Ackerman模型更新车辆位置
+                # # 根据Ackerman几何，车辆会沿着一个圆弧运动
+                # if abs(steering_center) < 1e-6:  # 直线运动
+                #     x = x + v * dt * math.sin(theta)
+                #     y = y + v * dt * math.cos(theta)
+                #     # 朝向角不变
+                # else:  # 转弯运动
+                #     # 计算转弯半径
+                #     turn_radius = wheelbase / math.tan(abs(steering_center))
+                    
+                #     # 计算角速度
+                #     angular_velocity = v / turn_radius
+                    
+                #     # 如果向左转，角速度为正；如果向右转，角速度为负
+                #     if turning_left:
+                #         angular_velocity = abs(angular_velocity)
+                #     else:
+                #         angular_velocity = -abs(angular_velocity)
+                    
+                #     # 计算转过的角度
+                #     delta_theta = angular_velocity * dt
+                    
+                #     # 更新朝向角
+                #     theta = theta + delta_theta
+                    
+                #     # 确保theta保持在合理范围内
+                #     theta = math.atan2(math.sin(theta), math.cos(theta))
+                    
+                #     # 计算车辆在圆弧上的位移
+                #     delta_x = turn_radius * (math.cos(theta - delta_theta) - math.cos(theta))
+                #     delta_y = turn_radius * (math.sin(theta) - math.sin(theta - delta_theta))
+                    
+                #     # 如果向左转，车辆中心在转弯圆心的左侧；如果向右转，在右侧
+                #     if turning_left:
+                #         x = x + delta_x
+                #         y = y + delta_y
+                #     else:
+                #         x = x - delta_x
+                #         y = y - delta_y
+                # # =====  完整的Ackerman模型  ===== #
+
+                # 调整速度 - 离参考路径越远，速度越慢
+                dist_to_ref = np.min(np.sqrt(np.sum(np.square(ref_path - np.array([x, y])), axis=1)))
+                v = max(3.0, 5.0 * (1.0 - 0.5 * math.exp(-3.0 / (dist_to_ref + 0.1))))
+        
+        return trajectories
+
+    def generate_ego_future_from_recovery(self, lateral_shift, ego_fut_trajs=None, base_future_length=6, time_interval=0.5):
+        """基于恢复轨迹生成ego未来轨迹预测
+        
+        Args:
+            lateral_shift (Tensor): 横向偏移量
+            ego_fut_trajs (Tensor): 真实的未来轨迹，用作参考路径
+            base_future_length (int): 未来轨迹的时间长度
+            time_interval (float): 轨迹点的时间间隔
+            
+        Returns:
+            Tensor: ego未来轨迹，形状为 [batch_size, fut_mode, future_length, 2]
+        """
+        batch_size = lateral_shift.shape[0]
+        device = lateral_shift.device
+        
+        # 计算恢复轨迹（密集采样，用于后续插值）
+        recovery_trajectories = self.plan_recovery_trajectory(
+            lateral_shift, 
+            ego_fut_trajs=ego_fut_trajs,
+            lookahead_distance=3.0, 
+            num_points=40,  # 采样更多点用于插值
+            dt=0.1
+        )
+        
+        # 初始化未来轨迹预测
+        # [batch_size, fut_mode, future_length, 2]
+        future_length = base_future_length
+        fut_mode = self.ego_fut_mode  # 使用配置中的未来模态数量
+        ego_future = torch.zeros((batch_size, fut_mode, future_length, 2), device=device)
+        
+        # 为不同模态生成略有变化的轨迹
+        for b in range(batch_size):
+            # 基础恢复轨迹
+            base_trajectory = recovery_trajectories[b]
+            
+            # 对每个模态生成略有变化的轨迹
+            for m in range(fut_mode):
+                # 时间间隔转换为点的索引间隔
+                step = int(time_interval / 0.1)  # 假设recovery轨迹的dt=0.1
+                
+                # 对于第一个模态，使用原始恢复轨迹
+                if m == 0:
+                    variation = 0.0
+                # 对于其他模态，添加一些变化
+                else:
+                    # 根据模态索引生成不同的变化
+                    variation = (m - fut_mode // 2) * 0.2  # 在原始轨迹周围生成变化
+                
+                # 提取对应时间点的轨迹，并添加变化
+                for t in range(future_length):
+                    idx = min((t+1) * step, base_trajectory.shape[0] - 1)
+                    ego_future[b, m, t, 0] = base_trajectory[idx, 0] + variation  # x坐标加上变化
+                    ego_future[b, m, t, 1] = base_trajectory[idx, 1]              # y坐标保持不变
+        
+        return ego_future
+
+    def visualize_recovery_trajectory(self, lateral_shift, img_metas, ego_fut_trajs=None, base_dir='/mnt/kuebiko/users/qdeng/GenAD/recovery_trajectory_vis_1'):
+        """可视化恢复轨迹，始终以自车位置为中心，前进方向向上
+        
+        Args:
+            lateral_shift (Tensor): 横向偏移量
+            img_metas (list): 包含场景信息的字典列表
+            ego_fut_trajs (Tensor): 真实的未来轨迹，用作参考路径
+            base_dir (str): 基础保存目录
+        """
+        batch_size = lateral_shift.shape[0]
+        
+        # 生成恢复轨迹
+        recovery_trajectories = self.plan_recovery_trajectory(
+            lateral_shift, 
+            ego_fut_trajs=ego_fut_trajs,
+            lookahead_distance=3.0, 
+            num_points=40,
+            dt=0.1
+        )
+        
+        # 生成ego未来轨迹
+        ego_futures = self.generate_ego_future_from_recovery(
+            lateral_shift,
+            ego_fut_trajs=ego_fut_trajs,
+            base_future_length=6,
+            time_interval=0.5
+        )
+        
+        # 从配置中获取BEV边界
+        x_min, y_min = self.pc_range[0], self.pc_range[1]
+        x_max, y_max = self.pc_range[3], self.pc_range[4]
+        
+        # 可视化每个样本的轨迹
+        for b in range(batch_size):
+            # 获取场景信息
+            scene_token = img_metas[b]['scene_token'] if img_metas else 'unknown'
+            
+            # 创建按场景组织的保存目录
+            save_dir = os.path.join(base_dir, scene_token)
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 创建图形
+            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+            
+            # 设置与BEV特征相同的坐标范围
+            plt.xlim(x_min, x_max)
+            plt.ylim(y_min, y_max)
+            
+            # 获取当前样本的偏移量
+            shift = lateral_shift[b].item()
+            
+            # 绘制原始自车位置(蓝色) - 在(0,0)位置
+            vehicle_length, vehicle_width = 4.0, 1.8  # 自车尺寸近似值
+            half_length, half_width = vehicle_length/2, vehicle_width/2
+            
+            # 绘制原始自车位置(以黑色表示) - 在(0,0)位置
+            rect_orig = plt.Rectangle(
+                (-half_width, -half_length), 
+                vehicle_width, vehicle_length, 
+                color='black', alpha=0.8, label='Original Position'
+            )
+            ax.add_patch(rect_orig)
+            # 添加朝向指示
+            ax.arrow(0, 0, 0, half_length, head_width=0.3, head_length=0.5, fc='black', ec='black')
+            
+            # 绘制偏移后自车位置(以绿色表示) - 在(shift,0)位置
+            rect_shifted = plt.Rectangle(
+                (shift-half_width, -half_length), 
+                vehicle_width, vehicle_length, 
+                color='green', alpha=0.8, label='Shifted Position'
+            )
+            ax.add_patch(rect_shifted)
+            # 添加朝向指示
+            ax.arrow(shift, 0, 0, half_length, head_width=0.3, head_length=0.5, fc='green', ec='green')
+            
+            # 绘制原始轨迹 (使用真实的未来轨迹)
+            if ego_fut_trajs is not None and ego_fut_trajs.shape[1] > 0:
+                # 获取原始轨迹数据 - 这是局部坐标系下的相对位移
+                orig_traj_deltas = ego_fut_trajs[b, 0, :, :].cpu().numpy()  # [future_length, 2]
+                
+                # 第一步：转换为局部坐标系下的绝对位置
+                local_abs_traj = np.zeros_like(orig_traj_deltas)
+                local_abs_traj[0] = orig_traj_deltas[0]  # 第一个点可能已经是位移
+                
+                # 累积求和得到局部坐标系下的绝对位置
+                for i in range(1, len(orig_traj_deltas)):
+                    local_abs_traj[i] = local_abs_traj[i-1] + orig_traj_deltas[i]
+                
+                # 使用转换后的局部绝对坐标绘制原始轨迹
+                # 注意：在BEV视图中，所有轨迹都应该相对于原点(0,0)绘制
+                ax.plot(local_abs_traj[:, 0], local_abs_traj[:, 1], 'k-', linewidth=4, 
+                    label='Original Trajectory', marker='o', markersize=5, zorder=5)
+                
+                # 在轨迹上添加方向箭头
+                for i in range(0, len(local_abs_traj)-1, 2):
+                    dx = local_abs_traj[i+1, 0] - local_abs_traj[i, 0]
+                    dy = local_abs_traj[i+1, 1] - local_abs_traj[i, 1]
+                    if dx**2 + dy**2 > 0.01:  # 只在点之间有足够距离时添加箭头
+                        ax.arrow(local_abs_traj[i, 0], local_abs_traj[i, 1], dx*0.7, dy*0.7, 
+                                head_width=0.3, head_length=0.5, fc='black', ec='black', zorder=6)
+                
+            # 绘制恢复轨迹 - 从(shift,0)开始
+            # recovery_trajectories已经是在BEV坐标系下的绝对位置
+            recovery_traj = recovery_trajectories[b].cpu().numpy()
+            ax.plot(recovery_traj[:, 0], recovery_traj[:, 1], 'b-', linewidth=3, label='Recovery Trajectory')
+            # 在轨迹上添加方向箭头
+            for i in range(1, len(recovery_traj), 5):
+                if i < len(recovery_traj)-1:
+                    dx = recovery_traj[i+1, 0] - recovery_traj[i, 0]
+                    dy = recovery_traj[i+1, 1] - recovery_traj[i, 1]
+                    if dx**2 + dy**2 > 0.01:    # 只有在点之间有显著移动时才添加箭头
+                        ax.arrow(recovery_traj[i, 0], recovery_traj[i, 1], dx*0.7, dy*0.7, 
+                                head_width=0.3, head_length=0.5, fc='blue', ec='blue', zorder=4)
+                
+            # 绘制ego未来轨迹（不同模态）
+            ego_future = ego_futures[b].cpu().numpy()
+            for m in range(ego_future.shape[0]):
+                if m == 0:
+                    ax.plot(ego_future[m, :, 0], ego_future[m, :, 1], 'g-', linewidth=3, 
+                        marker='o', markersize=5, label=f'Ego Future Mode {m}', zorder=3)
+                else:
+                    ax.plot(ego_future[m, :, 0], ego_future[m, :, 1], 'g--', linewidth=2, 
+                        alpha=0.7, zorder=2)
+                    
+            # 设置图形属性
+            plt.grid(True)
+            plt.xlabel('Lateral Position (m)')
+            plt.ylabel('Longitudinal Position (m)')
+            plt.title(f'Recovery Trajectory from Lateral Shift: {shift:.2f} m')
+            plt.legend(loc='upper right')
+            # 保持坐标轴相等比例，确保视觉上不失真
+            plt.axis('equal')
+            
+            # 添加参考线
+            plt.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+            plt.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+            plt.axvline(x=shift, color='gray', linestyle='--', alpha=0.5)
+            
+            # 添加BEV边界框参考线
+            plt.plot([x_min, x_max, x_max, x_min, x_min], 
+                    [y_min, y_min, y_max, y_max, y_min], 
+                    'k:', alpha=0.3)
+            
+            # 标注前进方向
+            plt.annotate('Forward Direction', xy=(0, y_max*0.9), xytext=(0, y_max*0.95), 
+                        arrowprops=dict(arrowstyle='->'), ha='center')
+            
+            # 保存图形
+            lidar_file = img_metas[b]['pts_filename'] if img_metas else 'unknown'
+            timestamp = re.search(r'__(\d+)\.pcd\.bin$', lidar_file).group(1) if lidar_file != 'unknown' else datetime.now().strftime('%Y%m%d_%H%M%S')
+            sample_idx = img_metas[b]['sample_idx'] if img_metas else 'unknown'
+            
+            save_path = os.path.join(save_dir, f'sample_{sample_idx}_{timestamp}_shift_{shift:.2f}.png')
+            plt.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close()
+            
+            print(f"Saved visualization to {save_path}")
+
+    def save_recovery_trajectories(self, lateral_shift, img_metas, ego_fut_trajs=None, base_dir='/mnt/kuebiko/users/qdeng/GenAD/recovery_trajectory_data'):
+        """保存恢复轨迹数据，按场景组织
+        """
+        batch_size = lateral_shift.shape[0]
+        
+        # 生成恢复轨迹
+        recovery_trajectories = self.plan_recovery_trajectory(
+            lateral_shift, 
+            ego_fut_trajs=ego_fut_trajs,
+            lookahead_distance=3.0, 
+            num_points=40,
+            dt=0.1
+        )
+        
+        # 生成ego未来轨迹
+        ego_futures = self.generate_ego_future_from_recovery(
+            lateral_shift,
+            ego_fut_trajs=ego_fut_trajs,
+            base_future_length=6,
+            time_interval=0.5
+        )
+        
+        # 保存每个样本的轨迹数据
+        for b in range(batch_size):
+            # 获取场景信息
+            scene_token = img_metas[b]['scene_token'] if img_metas else 'unknown'
+            
+            # 创建按场景组织的保存目录
+            save_dir = os.path.join(base_dir, scene_token)
+            os.makedirs(save_dir, exist_ok=True)
+            
+            lidar_file = img_metas[b]['pts_filename'] if img_metas else 'unknown'
+            timestamp = re.search(r'__(\d+)\.pcd\.bin$', lidar_file).group(1) if lidar_file != 'unknown' else datetime.now().strftime('%Y%m%d_%H%M%S')
+            sample_idx = img_metas[b]['sample_idx'] if img_metas else 'unknown'
+            
+            # 创建保存路径
+            save_path = os.path.join(save_dir, f'sample_{sample_idx}_{timestamp}_shift_{lateral_shift[b].item():.2f}')
+            
+            # 保存数据
+            data_dict = {
+                'lateral_shift': lateral_shift[b].item(),
+                'recovery_trajectory': recovery_trajectories[b].cpu().numpy().tolist(),
+                'ego_future': ego_futures[b].cpu().numpy().tolist(),
+                'metadata': {
+                    'scene_token': scene_token,
+                    'timestamp': timestamp,
+                    'sample_idx': img_metas[b]['sample_idx'] if img_metas else None,
+                }
+            }
+            
+            # 保存为JSON文件
+            with open(f'{save_path}.json', 'w') as f:
+                json.dump(data_dict, f, indent=4)
+            
+            # 同时保存为PyTorch张量
+            torch.save({
+                'lateral_shift': lateral_shift[b],
+                'recovery_trajectory': recovery_trajectories[b],
+                'ego_future': ego_futures[b],
+                'metadata': {
+                    'scene_token': scene_token,
+                    'timestamp': timestamp,
+                    'sample_idx': img_metas[b]['sample_idx'] if img_metas else None,
+                }
+            }, f'{save_path}.pth')
+            
+            print(f"Saved trajectory data to {save_path}")
+
     # @auto_fp16(apply_to=('mlvl_feats'))
     @force_fp32(apply_to=('mlvl_feats', 'prev_bev'))
     def forward(self,
@@ -544,6 +1394,7 @@ class GenADHead(DETRHead):
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
         object_query_embeds = self.query_embedding.weight.to(dtype)
+        # query_embedding是在_init_layers中定义的
 
         if self.map_query_embed_type == 'all_pts':
             map_query_embeds = self.map_query_embedding.weight.to(dtype)
@@ -552,12 +1403,130 @@ class GenADHead(DETRHead):
             map_instance_embeds = self.map_instance_embedding.weight.unsqueeze(1)
             map_query_embeds = (map_pts_embeds + map_instance_embeds).flatten(0, 1).to(dtype)
 
+        # 初始化BEV查询向量
+        # bev_queries是BEV特征的查询向量(query embedding)，用于transformer中的注意力机制
+        # 可学习的嵌入权重矩阵
         bev_queries = self.bev_embedding.weight.to(dtype)
+        # bev_queries.shape -- [10000,256]
 
+        # ============ 生成自车位置偏移的BEV特征 ============ #
+        # 定义T
+        T = torch.zeros((bs, 3), device=mlvl_feats[0].device)
+
+        # ============ Gasussian noise  ============ #
+        mean = 0.0  # 均值，表示在自车位置附近生成偏移量
+        std = 1.0   # 标准差，约为车体宽度的1/2
+        device = mlvl_feats[0].device
+        # ------- 同一场景不同偏移 ------- #
+        # # （同一批次内所有样本相同偏移，不同批次不同偏移）
+        # # 生成单一偏移值并复制到整个批次
+        # single_shift = torch.normal(mean=mean, std=std, size=(1,), device=mlvl_feats[0].device)
+        # lateral_shift = single_shift.repeat(bs)
+        # # torch.manual_seed(42)  # 确保每次生成相同的随机数
+        # # # （同一批次内所有样本不同偏移，不同批次不同偏移）
+        # # lateral_shift = torch.normal(mean=mean, std=std, size=(bs,), device=mlvl_feats[0].device)
+        # # ------- 同一场景不同偏移 ------- #
+
+        # -------同一场景相同偏移------- #
+        # 1. 尝试从文件加载场景偏移映射
+        if os.path.exists(self.shift_file) and not self.scene_shifts:
+            try:
+                with open(self.shift_file, 'r') as f:
+                    self.scene_shifts = json.load(f)
+            except:
+                self.scene_shifts = {}
+        
+        # 2. 收集需要新偏移值的场景
+        new_scenes = []
+        for meta in img_metas:
+            scene_token = meta['scene_token']
+            if scene_token not in self.scene_shifts:
+                new_scenes.append(scene_token)
+                
+        # 3. 为新场景生成偏移值
+        if new_scenes:
+            # 获取所有现有偏移值
+            existing_shifts = list(map(float, self.scene_shifts.values())) if self.scene_shifts else []
+            
+            # 为新场景生成不重复的偏移值
+            for scene in new_scenes:
+                while True:
+                    # 生成符合高斯分布的候选偏移值
+                    shift = float(self.shift_rng.normal(mean, std))
+                    # 确保与现有值有足够差异
+                    if all(abs(shift - ex_shift) > 0.01 for ex_shift in existing_shifts):
+                        self.scene_shifts[scene] = shift
+                        existing_shifts.append(shift)
+                        break
+            # 4. 保存更新后的映射
+            try:
+                os.makedirs(os.path.dirname(self.shift_file), exist_ok=True)
+                with open(self.shift_file, 'w') as f:
+                    json.dump(self.scene_shifts, f)
+            except:
+                print("Warning: Failed to save scene shifts file")
+
+        # 5. 应用偏移值到当前批次
+        lateral_shift = torch.zeros((bs,), device=device)
+        # -------同一场景相同偏移------- #
+
+        # 记录偏移量和相关信息
+        lidar_file = img_metas[0]['pts_filename']
+        timestamp = re.search(r'__(\d+)\.pcd\.bin$', lidar_file).group(1)
+
+        for b in range(bs):
+            scene_token = img_metas[b]['scene_token']
+            lateral_shift[b] = torch.tensor(float(self.scene_shifts[scene_token]), device=device)
+            
+            # 记录偏移信息
+            shift_info = {
+                'lateral_shift': np.array([float(self.scene_shifts[scene_token])]),
+                'timestamp': re.search(r'__(\d+)\.pcd\.bin$', img_metas[b]['pts_filename']).group(1),
+                'scene_token': scene_token,
+                'sample_idx': img_metas[b]['sample_idx']
+            }
+            self.shift_log.append(shift_info)
+        self.save_shift_log()
+
+         # ----- 设置固定的偏移量（用于验证bev_embed的具体值）----- #
+        # 计算恰好移动10个网格（对应sample_cols中的间距）的物理距离
+        # grid_shift = 10  # 移动的网格数量，与sample_cols间隔一致
+        # shift_distance = grid_shift * (self.real_w / self.bev_w)
+        # T[:, 0] = -shift_distance
+        # lateral_shift = torch.ones((bs,), device=mlvl_feats[0].device) * shift_distance
+        # ----- 设置固定的偏移量（用于验证bev_embed的具体值）----- #
+        
+        T[:, 0] = lateral_shift # x方向按高斯分布生成偏移量
+        # T[:, 0] = 2.0  # x方向平移2米
+        # T[:, 1] = 0.0  # y方向不平移
+        # T[:, 2] = 0.0  # 旋转角度保持为零（默认就是零）
+
+        # bev_mask用于标记哪些区域需要计算位置编码
         bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),
                                device=bev_queries.device).to(dtype)
-        bev_pos = self.positional_encoding(bev_mask).to(dtype)
+        bev_pos = self.positional_encoding(bev_mask)
+        # 无padding
+        bev_pos_t =self.se2_transform(bev_pos, T)
+        # 有padding
+        padding_mode = 'reflection'  # 'zeros', 'replicate', 'reflection', 'edge_mask'
+        bev_pos_t_p = self.improved_se2_transform(bev_pos, T, padding_mode=padding_mode)
+        # ============ 生成自车位置偏移的BEV特征 ============ #
 
+        # =========== 原代码 =========== #
+        # # 初始化BEV mask
+        # # bev_mask表示BEV视图中的有效区域掩码,在本代码中是全零矩阵，也不会更新        
+        # bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),
+        #                        device=bev_queries.device).to(dtype)
+        # # bev_mask.shape -- [1,100,100]
+
+        # # PE
+        # # 位置编码作用于key（mlvl_feats）和query(bev_queries)
+        # # positional_encoding指向LearnedPositionalEncoding类，定义在/mnt/kuebiko/users/qdeng/anaconda3/envs/genad/lib/python3.8/site-packages/mmdet/models/utils/positional_encoding.py路径下
+        # bev_pos = self.positional_encoding(bev_mask).to(dtype)
+        # # bev_pos.shape -- [1,256,100,100]
+        # =========== 原代码 =========== #
+
+        # 只使用encoder提取BEV特征
         if only_bev:  # only use encoder to obtain BEV features, TODO: refine the workaround
             return self.transformer.get_bev_features(
                 mlvl_feats,
@@ -566,21 +1535,27 @@ class GenADHead(DETRHead):
                 self.bev_w,
                 grid_length=(self.real_h / self.bev_h,
                              self.real_w / self.bev_w),
-                bev_pos=bev_pos,
+                # bev_pos=bev_pos,
+                # bev_pos=bev_pos_t,
+                bev_pos=bev_pos_t_p,
                 img_metas=img_metas,
                 prev_bev=prev_bev,
             )
+        # 调用GenAD_transformer的forward函数
+        # Call the forward function of GenAD_transformer
         else:
             outputs = self.transformer(
-                mlvl_feats,
-                bev_queries,
+                mlvl_feats,             # 多视角图像特征，作为 Key 和 Value
+                bev_queries,            # BEV查询向量，作为 Query
                 object_query_embeds,
                 map_query_embeds,
                 self.bev_h,
                 self.bev_w,
                 grid_length=(self.real_h / self.bev_h,
                              self.real_w / self.bev_w),
-                bev_pos=bev_pos,
+                # bev_pos=bev_pos,
+                # bev_pos=bev_pos_t,
+                bev_pos=bev_pos_t_p,
                 reg_branches=self.reg_branches if self.with_box_refine else None,  # noqa:E501
                 cls_branches=self.cls_branches if self.as_two_stage else None,
                 map_reg_branches=self.map_reg_branches if self.with_box_refine else None,  # noqa:E501
@@ -599,36 +1574,180 @@ class GenADHead(DETRHead):
 
         bev_embed, hs, init_reference, inter_references, \
         map_hs, map_init_reference, map_inter_references = outputs
+        # （和uniad的uniad_track.py中的forward_track_train函数进行对比）bev_embed是单帧的结果，不会被更新或修改
+        
+        # 无padding
+        bev_embed_t = self.se2_transform(bev_embed, T)  # T是自车位置偏移的变换矩阵
+        # 有padding
+        bev_embed_t_p = self.improved_se2_transform(bev_embed, T, padding_mode=padding_mode)
 
-        hs = hs.permute(0, 2, 1, 3)
-        outputs_classes = []
-        outputs_coords = []
-        outputs_coords_bev = []
-        outputs_trajs = []
-        outputs_trajs_classes = []
+        # bev_embed.shape --[10000, 1, 256]，10000代表100*100个grid，1代表1个batch，256代表特征维度
+        # config文件中设置了bev_h_ = 100，bev_w_ = 100
 
-        map_hs = map_hs.permute(0, 2, 1, 3)
+        # ========= 特征值检查 ========= #
+        # 将[H*W, B, C]形状重塑为[H, W, B, C]以便于按grid位置比较
+        bev_h = self.bev_h  # 100
+        bev_w = self.bev_w  # 100
+        bev_embed_reshaped = bev_embed.reshape(bev_h, bev_w, -1, bev_embed.shape[-1])
+        bev_embed_t_reshaped = bev_embed_t.reshape(bev_h, bev_w, -1, bev_embed_t.shape[-1])
+        bev_embed_t_p_reshaped = bev_embed_t_p.reshape(bev_h, bev_w, -1, bev_embed_t_p.shape[-1])
+
+        # 计算横向偏移量（以网格数为单位）
+        shift_in_grids = int(lateral_shift[0].item() / (self.real_w / self.bev_w))
+        print(f"Lateral shift: {lateral_shift[0].item():.3f}m, approximately {shift_in_grids} grids")
+
+        # 选择关键位置进行比较
+        positions = {
+            'center': (bev_h // 2, bev_w // 2),                # 中心位置
+            'left_edge': (bev_h // 2, 0),                      # 左边缘
+            'right_edge': (bev_h // 2, bev_w - 1),             # 右边缘
+            'shifted_ref': (bev_h // 2, bev_w // 2 - shift_in_grids)  # 预期偏移后对应的位置
+        }
+
+        # 创建log目录
+        log_dir = '/mnt/kuebiko/users/qdeng/GenAD/bev_feature_compare_logs'
+        os.makedirs(log_dir, exist_ok=True)
+
+        # 获取当前时间戳和场景信息
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        scene_token = img_metas[0]['scene_token']
+        sample_idx = img_metas[0]['sample_idx']
+        log_file = os.path.join(log_dir, f'bev_compare_{scene_token}_{sample_idx}_{timestamp}.txt')
+
+        with open(log_file, 'w') as f:
+            f.write(f"BEV Embedding Comparison\n")
+            f.write(f"=======================\n")
+            f.write(f"Lateral shift: {lateral_shift[0].item():.3f}m, approximately {shift_in_grids} grids\n\n")
+            
+            # 比较特定位置的特征值
+            for pos_name, (h, w) in positions.items():
+                if 0 <= w < bev_w:  # 确保位置在有效范围内
+                    f.write(f"Position: {pos_name} ({h}, {w})\n")
+                    f.write(f"Original:          {bev_embed_reshaped[h, w, 0, :5].cpu().detach().numpy()}\n")
+                    f.write(f"Shifted (no pad):  {bev_embed_t_reshaped[h, w, 0, :5].cpu().detach().numpy()}\n")
+                    f.write(f"Shifted (with pad):{bev_embed_t_p_reshaped[h, w, 0, :5].cpu().detach().numpy()}\n\n")
+            
+            # 检查横向连续网格的值变化
+            row_idx = bev_h // 2  # 中心行
+            f.write(f"Values along middle row (row {row_idx}), showing 1st feature dimension:\n")
+            
+            # 选择11个等间距的列位置（包括中心和边缘）
+            sample_cols = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 99]
+            
+            f.write("Column index:       " + " ".join([f"{c:6d}" for c in sample_cols]) + "\n")
+            
+            # 显示第一个特征维度的值
+            feature_idx = 0
+            
+            # 原始BEV特征
+            values_orig = [f"{bev_embed_reshaped[row_idx, c, 0, feature_idx].item():.1f}" for c in sample_cols]
+            f.write("Original:           " + " ".join([f"{v:6s}" for v in values_orig]) + "\n")
+            
+            # 无padding的偏移BEV特征
+            values_shift = [f"{bev_embed_t_reshaped[row_idx, c, 0, feature_idx].item():.1f}" for c in sample_cols]
+            f.write("Shifted (no pad):   " + " ".join([f"{v:6s}" for v in values_shift]) + "\n")
+            
+            # 有padding的偏移BEV特征
+            values_shift_pad = [f"{bev_embed_t_p_reshaped[row_idx, c, 0, feature_idx].item():.1f}" for c in sample_cols]
+            f.write("Shifted (with pad): " + " ".join([f"{v:6s}" for v in values_shift_pad]) + "\n\n")
+            
+            # 检查预期的偏移效果
+            if 0 <= shift_in_grids < bev_w:
+                f.write("Checking expected shift pattern:\n")
+                for col in range(30, 70, 5):  # 只检查中间部分的几个列
+                    if 0 <= col < bev_w and 0 <= col + shift_in_grids < bev_w:
+                        orig_val = bev_embed_reshaped[row_idx, col, 0, :3].cpu().detach().numpy()
+                        shifted_val = bev_embed_t_reshaped[row_idx, col + shift_in_grids, 0, :3].cpu().detach().numpy()
+                        f.write(f"Original at col {col}: {orig_val}\n")
+                        f.write(f"Shifted at col {col + shift_in_grids}: {shifted_val}\n")
+                        if np.allclose(orig_val, shifted_val, rtol=1e-1, atol=1e-1):
+                            f.write("MATCH ✓\n\n")
+                        else:
+                            f.write("DIFFERENT ✗\n\n")
+
+        print(f"BEV feature comparison saved to {log_file}")
+        # ========= 特征值检查 ========= #
+
+        # save BEV features
+        # 为了保证可视化代码的一致性，不更改key的名称和变量维度等信息
+        def save_bev_features(bev_features, img_metas, bev_h, bev_w, base_path):
+            """保存BEV特征
+            Args:
+                bev_features (Tensor): [H*W, bs, C] = [10000,1,256]BEV特征图
+                img_metas (list): 包含场景信息的字典列表
+                bev_h (int): BEV特征图高度
+                bev_w (int): BEV特征图宽度
+                base_path (str): 保存路径基准目录
+            """
+            for batch_idx, meta in enumerate(img_metas):
+                scene_token = meta['scene_token']
+                sample_token = meta['sample_idx']
+                
+                lidar_file = meta['pts_filename']
+                timestamp = re.search(r'__(\d+)\.pcd\.bin$', lidar_file).group(1)
+                
+                save_dir = os.path.join(base_path, scene_token)
+                os.makedirs(save_dir, exist_ok=True)
+                
+                save_name = f"{sample_token}_{timestamp}.pth"
+                save_path = os.path.join(save_dir, save_name)
+                
+                # 保存特征
+                save_dict = {
+                    'features': bev_features.detach().cpu(),  
+                    'bev_h': bev_h,
+                    'bev_w': bev_w,
+                    'timestamp': timestamp,
+                    'scene_token': scene_token,
+                    'sample_token': sample_token
+                }
+                torch.save(save_dict, save_path)
+        
+        # 保存路径命名规则--bev_features_[进行的操作（shift/rotation/padding..）_[模型名称]_[epoch数]
+        save_bev_features(bev_embed, img_metas, self.bev_h, self.bev_w, base_path='/mnt/kuebiko/users/qdeng/GenAD/bev_features_pretrained')
+        save_bev_features(bev_embed_t, img_metas, self.bev_h, self.bev_w, base_path='/mnt/kuebiko/users/qdeng/GenAD/bev_features_lateral_shift_pretrained')
+        save_bev_features(bev_embed_t_p, img_metas, self.bev_h, self.bev_w, base_path='/mnt/kuebiko/users/qdeng/GenAD/bev_features_lateral_shift_padding_pretrained')
+
+        # hs.shape --[3,300,1,256] = [num_decoder_layers, num_query, batch_size, embed_dims]
+        # 维度调整
+        hs = hs.permute(0, 2, 1, 3)                 # agent_query特征
+        # hs 是来自 transformer decoder 的层级化输出特征
+        # hs的原始维度: [num_layers, num_query, batch_size, embed_dims]
+        # hs permute后的维度: [num_layers, batch_size, num_query, embed_dims]
+        outputs_classes = []                        # 检测分类
+        outputs_coords = []                         # 检测框坐标，实际物理坐标
+        outputs_coords_bev = []                     # 检测框BEV坐标，在BEV特征图上的归一化坐标，值域在[0,1]之间
+        outputs_trajs = []                          # 轨迹预测
+        outputs_trajs_classes = []                  # 轨迹分类
+
+        map_hs = map_hs.permute(0, 2, 1, 3)        # map_query特征
         map_outputs_classes = []
         map_outputs_coords = []
         map_outputs_pts_coords = []
         map_outputs_coords_bev = []
 
+        # 目标检测解码
         for lvl in range(hs.shape[0]):
+            # 获取参考点
             if lvl == 0:
-                reference = init_reference
+                reference = init_reference                  # 第一层的参考点, 表示初始预测的目标位置，shape: [batch_size, num_queries, 3]
             else:
-                reference = inter_references[lvl - 1]
-            reference = inverse_sigmoid(reference)
-            outputs_class = self.cls_branches[lvl](hs[lvl])
-            tmp = self.reg_branches[lvl](hs[lvl])
+                reference = inter_references[lvl - 1]       # 中间层的参考点, ，表示经过一层refinement后更新的目标位置，shape: [batch_size, num_queries, 3]
+            reference = inverse_sigmoid(reference)          # 将sigmoid值域[0,1]转回原始预测值域
+            # 分类和坐标回归
+            outputs_class = self.cls_branches[lvl](hs[lvl]) # 分类预测
+            tmp = self.reg_branches[lvl](hs[lvl])           # 回归预测 （box_dim维度的预测值）
 
             # TODO: check the shape of reference
             assert reference.shape[-1] == 3
-            tmp[..., 0:2] = tmp[..., 0:2] + reference[..., 0:2]
-            tmp[..., 0:2] = tmp[..., 0:2].sigmoid()
+            # xy平面坐标解码
+            tmp[..., 0:2] = tmp[..., 0:2] + reference[..., 0:2] # 加上参考点的xy偏移量
+            tmp[..., 0:2] = tmp[..., 0:2].sigmoid()             # 归一化到[0,1]之间
             outputs_coords_bev.append(tmp[..., 0:2].clone().detach())
-            tmp[..., 4:5] = tmp[..., 4:5] + reference[..., 2:3]
-            tmp[..., 4:5] = tmp[..., 4:5].sigmoid()
+            # z轴坐标解码
+            tmp[..., 4:5] = tmp[..., 4:5] + reference[..., 2:3] # 加上参考点的高度（z）偏移量
+            tmp[..., 4:5] = tmp[..., 4:5].sigmoid()             # 归一化到[0,1]之间
+            # 坐标转换到实际尺度
             tmp[..., 0:1] = (tmp[..., 0:1] * (self.pc_range[3] -
                                               self.pc_range[0]) + self.pc_range[0])
             tmp[..., 1:2] = (tmp[..., 1:2] * (self.pc_range[4] -
@@ -639,23 +1758,29 @@ class GenADHead(DETRHead):
             # TODO: check if using sigmoid
             outputs_coord = tmp
             outputs_classes.append(outputs_class)
-            outputs_coords.append(outputs_coord)
+            outputs_coords.append(outputs_coord)        # outputs_coords--[num_decoder_layers, batch_size, num_queries, box_dim]
+            # outputs_coords的最后一维box_dim应该包含以下信息：[x, y, w, l, z, h, rot, vx, vy]
 
+        # 地图元素解码
         for lvl in range(map_hs.shape[0]):
             if lvl == 0:
                 reference = map_init_reference
             else:
                 reference = map_inter_references[lvl - 1]
             reference = inverse_sigmoid(reference)
+            # 地图元素分类
             map_outputs_class = self.map_cls_branches[lvl](
                 map_hs[lvl].view(bs, self.map_num_vec, self.map_num_pts_per_vec, -1).mean(2)
             )
+            # 地图元素坐标回归
             tmp = self.map_reg_branches[lvl](map_hs[lvl])
             # TODO: check the shape of reference
             assert reference.shape[-1] == 2
             tmp[..., 0:2] += reference[..., 0:2]
             tmp = tmp.sigmoid()  # cx,cy,w,h
+            # 坐标变换
             map_outputs_coord, map_outputs_pts_coord = self.map_transform_box(tmp)
+            # 保存结果
             map_outputs_coords_bev.append(map_outputs_pts_coord.clone().detach())
             map_outputs_classes.append(map_outputs_class)
             map_outputs_coords.append(map_outputs_coord)
@@ -664,13 +1789,16 @@ class GenADHead(DETRHead):
         # motion prediction
 
         # motion query
+        # 运动预测
         if self.motion_decoder is not None:
             batch_size, num_agent = outputs_coords_bev[-1].shape[:2]
-            # motion_query
+            # 提取motion_query
             motion_query = hs[-1].permute(1, 0, 2)  # [A, B, D]
+            # 多运动模态预测
             mode_query = self.motion_mode_query.weight  # [fut_mode, D]
             # [M, B, D], M=A*fut_mode
             motion_query = (motion_query[:, None, :, :] + mode_query[None, :, None, :]).flatten(0, 1)
+            # 运动位置编码
             if self.use_pe:
                 motion_coords = outputs_coords_bev[-1]  # [B, A, 2]
                 motion_pos = self.pos_mlp_sa(motion_coords)  # [B, A, D]
@@ -696,11 +1824,16 @@ class GenADHead(DETRHead):
                 # ego <-> agent Interaction
             ego_query = ego_his_feats.permute(1, 0, 2)
             ego_pos = torch.zeros((batch_size, 1, 2), device=ego_query.device).permute(1, 0, 2)
+            # ego_pos.shape -- [1,1,2]=[1, B, 2]
+            # 需要根据bev_pos_t的变化量相应地变换ego_pos
+            # ego_pos = self.se2_transform(ego_pos, T)        # T是自车位置偏移的变换矩阵
+            
             ego_pos_emb = self.ego_agent_pos_mlp(ego_pos)
 
             motion_query = torch.cat([motion_query, ego_query], dim=0)
             motion_pos = torch.cat([motion_pos, ego_pos_emb], dim=0)
 
+            # Instance Encoder (论文中的Self-attention + Cross-attention)
             motion_hs = self.motion_decoder(
                 query=motion_query,
                 key=motion_query,
@@ -741,6 +1874,7 @@ class GenADHead(DETRHead):
                 else:
                     motion_pos, map_pos = None, None
 
+                # Agent-Map Cross-attention
                 ca_motion_query = self.motion_map_decoder(
                     query=ca_motion_query,
                     key=map_query,
@@ -758,9 +1892,12 @@ class GenADHead(DETRHead):
             # states = torch.randn((2, 1, 64, 200, 200), device=motion_hs.device)
             # future_distribution_inputs = torch.randn((2, 5, 6, 200, 200), device=motion_hs.device)
             noise = None
+            # VAE采样和分布预测
             if self.training:
+                # future_distribution_inputs即论文中的ground-truth trajectories
                 future_distribution_inputs = self.get_future_labels(gt_labels_3d, gt_attr_labels,
-                                                                    ego_fut_trajs, motion_hs.device)
+                                                                    ego_fut_trajs, motion_hs.device) 
+                # print("future_distribution_inputs shape: ", future_distribution_inputs.shape)
             else:
                 future_distribution_inputs = None
 
@@ -769,6 +1906,7 @@ class GenADHead(DETRHead):
                 # present_state = states[:, :1].contiguous()
                 if self.probabilistic:
                     # Do probabilistic computation
+                    # VAE encoder，对应论文中的future trajectory encoder
                     sample, output_distribution = self.distribution_forward(
                         current_states, future_distribution_inputs, noise
                     )
@@ -776,6 +1914,7 @@ class GenADHead(DETRHead):
 
             # 2. predict future state from distribution
             hidden_states = current_states
+            # 基于采样生成（预测）未来状态，对应论文中的future trajectory generator
             states_hs, future_states_hs = self.future_states_predict(
                 batch_size=batch_size,
                 sample=sample,
@@ -786,15 +1925,68 @@ class GenADHead(DETRHead):
             ego_query_hs = states_hs[:, :, self.agent_dim * self.fut_mode, :].unsqueeze(1).permute(0, 2, 1, 3)
             motion_query_hs = states_hs[:, :, 0:self.agent_dim * self.fut_mode, :]
             motion_query_hs = motion_query_hs.reshape(self.fut_ts, batch_size, -1, self.fut_ts, motion_query_hs.shape[-1])
+            
+            # ego-vehicle和agents的轨迹预测
             ego_fut_trajs_list = []
             motion_fut_trajs_list = []
+
+            # ==== 原有的轨迹预测代码 ==== #
+            # for i in range(self.fut_ts):
+            #     outputs_ego_trajs = self.ego_fut_decoder(ego_query_hs[i]).reshape(batch_size, self.ego_fut_mode, 2)
+            #     ego_fut_trajs_list.append(outputs_ego_trajs)
+            #     outputs_agent_trajs = self.traj_branches[0](motion_query_hs[i])
+            #     motion_fut_trajs_list.append(outputs_agent_trajs)
+            # ego_trajs = torch.stack(ego_fut_trajs_list, dim=2)
+            # ==== 原有的轨迹预测代码 ==== #
+
+            # ==== joy修改轨迹预测代码 ==== #
             for i in range(self.fut_ts):
-                outputs_ego_trajs = self.ego_fut_decoder(ego_query_hs[i]).reshape(batch_size, self.ego_fut_mode, 2)
-                ego_fut_trajs_list.append(outputs_ego_trajs)
+                # 生成agent轨迹 (这部分在所有条件下都要执行)
                 outputs_agent_trajs = self.traj_branches[0](motion_query_hs[i])
                 motion_fut_trajs_list.append(outputs_agent_trajs)
 
-            ego_trajs = torch.stack(ego_fut_trajs_list, dim=2)
+            # 根据lateral_shift生成恢复轨迹作为ego未来轨迹
+            # print("ego_fut_trajs: ", ego_fut_trajs)
+            recovery_ego_trajs = self.generate_ego_future_from_recovery(lateral_shift,ego_fut_trajs=ego_fut_trajs)
+
+            if self.training:                   # 训练阶段：随机选择是否使用恢复轨迹
+                if random.random() < 0.5:  # 50%概率使用恢复轨迹
+                    ego_trajs = recovery_ego_trajs
+                else:
+                    # 原有的ego轨迹生成代码
+                    ego_fut_trajs_list = []
+                    for i in range(self.fut_ts):
+                        outputs_ego_trajs = self.ego_fut_decoder(ego_query_hs[i]).reshape(batch_size, self.ego_fut_mode, 2)
+                        ego_fut_trajs_list.append(outputs_ego_trajs)
+                    ego_trajs = torch.stack(ego_fut_trajs_list, dim=2)
+            else:                               # 评估阶段：当有明显偏移时使用恢复轨迹，否则使用原轨迹
+                lateral_shift_abs = torch.abs(lateral_shift)
+                use_recovery = lateral_shift_abs > 0.3  # 偏移超过0.3米时使用恢复轨迹
+                
+                if use_recovery.any():
+                    # 对每个样本分别处理
+                    ego_fut_trajs_list = []
+                    for i in range(self.fut_ts):
+                        outputs_ego_trajs = self.ego_fut_decoder(ego_query_hs[i]).reshape(batch_size, self.ego_fut_mode, 2)
+                        ego_fut_trajs_list.append(outputs_ego_trajs)
+                    original_ego_trajs = torch.stack(ego_fut_trajs_list, dim=2)
+                    
+                    # 创建结果张量
+                    ego_trajs = original_ego_trajs.clone()
+                    
+                    # 对需要恢复的样本使用恢复轨迹
+                    for b in range(batch_size):
+                        if use_recovery[b]:
+                            ego_trajs[b] = recovery_ego_trajs[b]
+                else:
+                    # 所有样本都使用原始轨迹
+                    ego_fut_trajs_list = []
+                    for i in range(self.fut_ts):
+                        outputs_ego_trajs = self.ego_fut_decoder(ego_query_hs[i]).reshape(batch_size, self.ego_fut_mode, 2)
+                        ego_fut_trajs_list.append(outputs_ego_trajs)
+                    ego_trajs = torch.stack(ego_fut_trajs_list, dim=2)
+            # ==== joy修改轨迹预测代码 ==== #
+
             agent_trajs = torch.stack(motion_fut_trajs_list, dim=3)
             agent_trajs = agent_trajs.reshape(batch_size, 1, self.agent_dim, self.fut_mode, -1)
 
@@ -824,22 +2016,40 @@ class GenADHead(DETRHead):
         # outputs_trajs_classes = outputs_trajs_classes.repeat(outputs_coords.shape[0], 1, 1, 1)
 
         outs = {
-            'bev_embed': bev_embed,
-            'all_cls_scores': outputs_classes,
-            'all_bbox_preds': outputs_coords,
-            'all_traj_preds': outputs_trajs.repeat(outputs_coords.shape[0], 1, 1, 1, 1),
-            'all_traj_cls_scores': outputs_trajs_classes.repeat(outputs_coords.shape[0], 1, 1, 1),
-            'map_all_cls_scores': map_outputs_classes,
-            'map_all_bbox_preds': map_outputs_coords,
-            'map_all_pts_preds': map_outputs_pts_coords,
+            # 'bev_embed': bev_embed,                                                               # [10000, 1, 256]
+            # 'bev_embed': bev_embed_t,                                                               # [10000, 1, 256]
+            'bev_embed': bev_embed_t_p,                                                               # [10000, 1, 256]
+            'all_cls_scores': outputs_classes,                                                      # [3, 1, 300, 10]
+            'all_bbox_preds': outputs_coords,                                                       # [3, 1, 300, 10], agents当前位置等检测结果
+            'all_traj_preds': outputs_trajs.repeat(outputs_coords.shape[0], 1, 1, 1, 1),            # [3, 1, 300, 6, 12],agents预测轨迹
+            'all_traj_cls_scores': outputs_trajs_classes.repeat(outputs_coords.shape[0], 1, 1, 1),  # [3, 1, 300, 6]
+            'map_all_cls_scores': map_outputs_classes,                                              # [3, 1, 100, 3]
+            'map_all_bbox_preds': map_outputs_coords,                                               # [3, 1, 100, 4]
+            'map_all_pts_preds': map_outputs_pts_coords,                                            # [3, 1, 100, 20, 2],地图元素
             'enc_cls_scores': None,
             'enc_bbox_preds': None,
             'map_enc_cls_scores': None,
             'map_enc_bbox_preds': None,
             'map_enc_pts_preds': None,
-            'ego_fut_preds': ego_trajs,
-            'loss_vae_gen': distribution_comp,
+            'ego_fut_preds': ego_trajs,                                                             # [1, 3, 6, 2],ego预测轨迹
+            'loss_vae_gen': distribution_comp,                                                      # present_mu[1,1,32]/present_log_sigma[1,1,32]/future_mu[1,1,32]/future_log_sigma[1,1,32]
+            'lateral_shift': lateral_shift,                                                         # 保存偏移量
+            'recovery_ego_trajs': recovery_ego_trajs,  # 添加恢复轨迹
+            'padding_mode': padding_mode,  # 记录使用的填充模式
         }
+
+        # 可视化和保存恢复轨迹
+        self.visualization_counter += 1
+        
+        # 定期可视化轨迹
+        if self.visualization_counter % self.visualize_freq == 0:
+            self.visualize_recovery_trajectory(lateral_shift, img_metas, ego_fut_trajs=ego_fut_trajs)
+
+        # 定期保存轨迹数据
+        # if self.visualization_counter % self.save_data_freq == 0:
+        #     self.save_recovery_trajectories(lateral_shift, img_metas, ego_fut_trajs=ego_fut_trajs)
+
+        # print("outs",outs)
 
         return outs
 

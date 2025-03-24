@@ -84,13 +84,15 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
         output = query
         intermediate = []
         intermediate_reference_points = []
+        # print("Layer type:", self.layers[0].__class__.__name__)
+        # layers指向DetrTransformerDecoderLayer这个类，定义在/mnt/kuebiko/users/qdeng/anaconda3/envs/genad/lib/python3.8/site-packages/mmdet/models/utils/transformer.py文件中
         for lid, layer in enumerate(self.layers):
 
             reference_points_input = reference_points[..., :2].unsqueeze(
                 2)  # BS NUM_QUERY NUM_LEVEL 2
             output = layer(
-                output,
-                *args,
+                output,         # query特征
+                *args,          # 包含了value=bev_embed等参数
                 reference_points=reference_points_input,
                 key_padding_mask=key_padding_mask,
                 **kwargs)

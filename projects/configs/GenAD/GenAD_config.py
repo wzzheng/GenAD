@@ -42,30 +42,31 @@ _num_levels_ = 1
 bev_h_ = 100
 bev_w_ = 100
 queue_length = 3 # each sequence contains `queue_length` frames.
-total_epochs = 60
+total_epochs = 1
 
 model = dict(
     type='GenAD',
     use_grid_mask=True,
-    video_test_mode=True,
+    video_test_mode=True,       # 视频测试模式，逐帧推理
     pretrained=dict(img='torchvision://resnet50'),
     img_backbone=dict(
-        type='ResNet',
+        type='ResNet',              # 主干网络，侧重于初级特征的提取
         depth=50,
         num_stages=4,
         out_indices=(3,),
         frozen_stages=1,
-        norm_cfg=dict(type='BN', requires_grad=False),
+        norm_cfg=dict(type='BN', requires_grad=False),  # 模型参数被冻结（requires_grad=False），梯度不会被计算
         norm_eval=True,
         style='pytorch'),
     img_neck=dict(
-        type='FPN',
+        type='FPN',                 # 颈部网络，用于特征融合
         in_channels=[2048],
         out_channels=_dim_,
         start_level=0,
         add_extra_convs='on_output',
         num_outs=_num_levels_,
         relu_before_extra_convs=True),
+    # GenADHead（DETRHead）
     pts_bbox_head=dict(
         type='GenADHead',
         map_thresh=0.5,
@@ -79,6 +80,7 @@ model = dict(
         ego_lcf_feat_idx=None,
         valid_fut_ts=6,
         agent_dim = 300,
+        # CustomTransformerDecoder
         ego_agent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=1,
@@ -162,6 +164,7 @@ model = dict(
         map_dir_interval=1,
         map_code_size=2,
         map_code_weights=[1.0, 1.0, 1.0, 1.0],
+        # GenADPerceptionTransformer
         transformer=dict(
             type='GenADPerceptionTransformer',
             map_num_vec=map_num_vec,
@@ -170,8 +173,9 @@ model = dict(
             use_shift=True,
             use_can_bus=True,
             embed_dims=_dim_,
+            # 这里的encoder和decoder和BEVFomer中的encoder和decoder是一样的
             encoder=dict(
-                type='BEVFormerEncoder',
+                type='BEVFormerEncoder',                # 定义在/GenAD/projects/mmdet3d_plugin/GenAD/modules/encoder.py里
                 num_layers=3,
                 pc_range=point_cloud_range,
                 num_points_in_pillar=4,
@@ -198,6 +202,7 @@ model = dict(
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm'))),
+            # DetectionTransformerDecoder
             decoder=dict(
                 type='DetectionTransformerDecoder',
                 num_layers=3,
@@ -219,6 +224,7 @@ model = dict(
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm'))),
+            # MapDetectionTransformerDecoder
             map_decoder=dict(
                 type='MapDetectionTransformerDecoder',
                 num_layers=3,
@@ -241,7 +247,7 @@ model = dict(
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm')))),
         bbox_coder=dict(
-            type='CustomNMSFreeCoder',
+            type='CustomNMSFreeCoder',      # 定义在/mnt/kuebiko/users/qdeng/GenAD/projects/mmdet3d_plugin/core/bbox/coders/fut_nms_free_coder.py文件中
             post_center_range=[-20, -35, -10.0, 20, 35, 10.0],
             pc_range=point_cloud_range,
             max_num=100,
@@ -312,20 +318,21 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'GenADCustomNuScenesDataset'
-data_root = '/mnt/nas/algorithm/ruiqi.song/helios/models/genAD/data/nuscenes/'
-data_root_ = '/mnt/nas/algorithm/ruiqi.song/helios/models/genAD/'
+data_root = '/mnt/kuebiko/users/qdeng/GenAD/data-mini/nuscenes/'
+data_root_ = '/mnt/kuebiko/users/qdeng/GenAD/'
 file_client_args = dict(backend='disk')
 
 train_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='PhotoMetricDistortionMultiViewImage'),
-    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
+    dict(type='LoadMultiViewImageFromFiles', to_float32=True),                                      # 加载多视角图像
+    dict(type='PhotoMetricDistortionMultiViewImage'),                                               # 光度变换
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),    # 加载3D边界框、标签等标注
     dict(type='CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='CustomObjectNameFilter', classes=class_names),
-    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='RandomScaleImageMultiViewImage', scales=[0.4]),
+    dict(type='NormalizeMultiviewImage', **img_norm_cfg),               # 图像归一化    
+    dict(type='RandomScaleImageMultiViewImage', scales=[0.4]),          # 图像随机缩放
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),
+    dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),   # 数据格式统一
+    # 将所有数据收集并打包
     dict(type='CustomCollect3D',\
          keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'ego_his_trajs',
                'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'])
@@ -343,6 +350,7 @@ test_pipeline = [
     dict(type='CustomObjectNameFilter', classes=class_names),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     # dict(type='PadMultiViewImage', size_divisor=32),
+    # 测试模式下的数据增强
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1600, 900),
@@ -359,12 +367,14 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=1,
-    workers_per_gpu=4,
+    # mini-batch的大小 = samples_per_gpu * queue_length * num_gpus
+    samples_per_gpu=1,          # 每个GPU处理1个样本（包含了连续3个时间戳的数据）
+    workers_per_gpu=4,          # 每个GPU配备4个CPU工作线程来准备数据
     train=dict(
-        type=dataset_type,
+        type=dataset_type,      # dataset_type='GenADCustomNuScenesDataset'
         data_root=data_root,
-        ann_file=data_root_ + 'vad_nuscenes_infos_temporal_train.pkl',
+        # ann_file=data_root_ + 'vad_nuscenes_infos_temporal_train.pkl',
+        ann_file=data_root_ + 'vad_nuscenes-mini_infos_temporal_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -372,7 +382,7 @@ data = dict(
         use_valid_flag=True,
         bev_size=(bev_h_, bev_w_),
         pc_range=point_cloud_range,
-        queue_length=queue_length,
+        queue_length=queue_length,      # 处理时序数据的长度(queue_length=3)
         map_classes=map_classes,
         map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,
         map_eval_use_same_gt_sample_num_flag=map_eval_use_same_gt_sample_num_flag,
@@ -383,7 +393,8 @@ data = dict(
     val=dict(type=dataset_type,
              pc_range=point_cloud_range,
              data_root=data_root,
-             ann_file=data_root_ + 'vad_nuscenes_infos_temporal_val.pkl',
+             # ann_file=data_root_ + 'vad_nuscenes_infos_temporal_val.pkl',
+             ann_file=data_root_ + 'vad_nuscenes-mini_infos_temporal_val.pkl',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1,
              map_classes=map_classes,
@@ -395,7 +406,8 @@ data = dict(
     test=dict(type=dataset_type,
               data_root=data_root,
               pc_range=point_cloud_range,
-              ann_file=data_root_ + 'vad_nuscenes_infos_temporal_val.pkl',
+            #   ann_file=data_root_ + 'vad_nuscenes_infos_temporal_val.pkl',
+              ann_file=data_root_ + 'vad_nuscenes-mini_infos_temporal_val.pkl',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality, samples_per_gpu=1,
               map_classes=map_classes,
@@ -430,6 +442,7 @@ evaluation = dict(interval=total_epochs, pipeline=test_pipeline, metric='bbox', 
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
+# 会覆盖default_runtime.py中的log_config
 log_config = dict(
     interval=100,
     hooks=[
@@ -440,5 +453,12 @@ log_config = dict(
 find_unused_parameters = True
 checkpoint_config = dict(interval=1, max_keep_ckpts=total_epochs)
 
+# load_from = "/mnt/kuebiko/users/qdeng/GenAD/ckpts/bevformer_r101_dcn_24ep.pth"         # BEVFormer
+load_from = "/mnt/kuebiko/users/qdeng/GenAD/ckpts/genad_checkpoints.pth"
 
-custom_hooks = [dict(type='CustomSetEpochInfoHook')]
+# CustomSetEpochInfoHook这个类定义在/GenAD/projects/mmdet3d_plugin/GenAD/hooks/custom_hooks.py文件中
+custom_hooks = [dict(type='CustomSetEpochInfoHook'),
+                dict(type='MergeResultsHook')
+    ]
+
+# custom_hooks = [dict(type='CustomSetEpochInfoHook')]

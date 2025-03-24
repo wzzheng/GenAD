@@ -17,6 +17,13 @@ from mmcv.utils import ext_loader
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 
+import pickle
+import os
+import json
+import torch.distributed as dist
+import torch.nn.functional as F
+import re
+import torch
 
 @TRANSFORMER_LAYER_SEQUENCE.register_module()
 class BEVFormerEncoder(TransformerLayerSequence):
@@ -34,9 +41,9 @@ class BEVFormerEncoder(TransformerLayerSequence):
                  **kwargs):
 
         super(BEVFormerEncoder, self).__init__(*args, **kwargs)
-        self.return_intermediate = return_intermediate
+        self.return_intermediate = return_intermediate      # 是否返回每层的中间结果
 
-        self.num_points_in_pillar = num_points_in_pillar
+        self.num_points_in_pillar = num_points_in_pillar    # 对应论文中的N_ref，表示在垂直方向 Z 上采样多少个层（默认 4），常见于 3D 场景里将高度均分；
         self.pc_range = pc_range
         self.fp16_enabled = False
 
@@ -45,7 +52,8 @@ class BEVFormerEncoder(TransformerLayerSequence):
         """Get the reference points used in SCA and TSA.
         Args:
             H, W: spatial shape of bev.
-            Z: hight of pillar.
+            Z: hight of pillar.  表示在“BEV 网格的高度维度”上，离散成 8 个基本切片或网格层。
+            num_points_in_pillar：在每个网格柱 (pillar) 里，采样4个参考点 (anchor)
             D: sample D points uniformly from each pillar.
             device (obj:`device`): The device where
                 reference_points should be.
@@ -56,6 +64,9 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
         # reference points in 3D space, used in spatial cross-attention (SCA)
         if dim == '3d':
+            # 对Z,H,W 方向做一个均匀网格采样
+            # xs, ys, zs 分别表示在 [0,1] 范围内的归一化坐标 (x/W, y/H, z/Z)
+            # za对应论文中选取的“柱子高度 anchor”
             zs = torch.linspace(0.5, Z - 0.5, num_points_in_pillar, dtype=dtype,
                                 device=device).view(-1, 1, 1).expand(num_points_in_pillar, H, W) / Z
             xs = torch.linspace(0.5, W - 0.5, W, dtype=dtype,
@@ -65,10 +76,12 @@ class BEVFormerEncoder(TransformerLayerSequence):
             ref_3d = torch.stack((xs, ys, zs), -1)
             ref_3d = ref_3d.permute(0, 3, 1, 2).flatten(2).permute(0, 2, 1)
             ref_3d = ref_3d[None].repeat(bs, 1, 1, 1)
+            # 最终得到形如 (bs, num_points_in_pillar*H*W, 3) 的 ref_3d
             return ref_3d
 
         # reference points on 2D bev plane, used in temporal self-attention (TSA).
         elif dim == '2d':
+            # 在 BEV 平面上（H×W）生成 2D 网格，每个点 [u,v] 也归一化到 [0,1]
             ref_y, ref_x = torch.meshgrid(
                 torch.linspace(
                     0.5, H - 0.5, H, dtype=dtype, device=device),
@@ -79,26 +92,28 @@ class BEVFormerEncoder(TransformerLayerSequence):
             ref_x = ref_x.reshape(-1)[None] / W
             ref_2d = torch.stack((ref_x, ref_y), -1)
             ref_2d = ref_2d.repeat(bs, 1, 1).unsqueeze(2)
+            # 最终得到形如 (bs, H*W, 1, 2) 的 ref_2d
             return ref_2d
 
     # This function must use fp32!!!
+    # 对应论文中的V_hit
     @force_fp32(apply_to=('reference_points', 'img_metas'))
     def point_sampling(self, reference_points, pc_range,  img_metas):
-
-        lidar2img = []
+        lidar2img = []              # lidar2img相当于相机外参
         for img_meta in img_metas:
             lidar2img.append(img_meta['lidar2img'])
         lidar2img = np.asarray(lidar2img)
         lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
         reference_points = reference_points.clone()
-
+        # pc_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+        # reference_points映射到自车坐标系下, 尺度被缩放为真实尺度
         reference_points[..., 0:1] = reference_points[..., 0:1] * \
             (pc_range[3] - pc_range[0]) + pc_range[0]
         reference_points[..., 1:2] = reference_points[..., 1:2] * \
             (pc_range[4] - pc_range[1]) + pc_range[1]
         reference_points[..., 2:3] = reference_points[..., 2:3] * \
             (pc_range[5] - pc_range[2]) + pc_range[2]
-
+        # 变成齐次坐标  # bs, num_points_in_pillar, bev_h * bev_w, xyz1
         reference_points = torch.cat(
             (reference_points, torch.ones_like(reference_points[..., :1])), -1)
 
@@ -112,17 +127,19 @@ class BEVFormerEncoder(TransformerLayerSequence):
         lidar2img = lidar2img.view(
             1, B, num_cam, 1, 4, 4).repeat(D, 1, 1, num_query, 1, 1)
 
+        # 对应原论文SCA中的P(p,i,j)
         reference_points_cam = torch.matmul(lidar2img.to(torch.float32),
                                             reference_points.to(torch.float32)).squeeze(-1)
         eps = 1e-5
-
+        # 只保留位于相机前方的点
         bev_mask = (reference_points_cam[..., 2:3] > eps)
+        # 齐次坐标下除以比例系数得到图像平面的坐标真值
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps)
-
+        # 像素坐标归一化
         reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
         reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
-
+        # 从相机感受野的角度再删选一次
         bev_mask = (bev_mask & (reference_points_cam[..., 1:2] > 0.0)
                     & (reference_points_cam[..., 1:2] < 1.0)
                     & (reference_points_cam[..., 0:1] < 1.0)
@@ -141,8 +158,8 @@ class BEVFormerEncoder(TransformerLayerSequence):
     @auto_fp16()
     def forward(self,
                 bev_query,
-                key,
-                value,
+                key,            # feat_flatten
+                value,          # feat_flatten
                 *args,
                 bev_h=None,
                 bev_w=None,
@@ -174,7 +191,11 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
         output = bev_query
         intermediate = []
+        # bev_query.shape -- [10000,1,256]
+        # bev_query是随机初始化的embedding，PCA可视化看到的是一堆噪点
 
+        # ref_3d 告诉网络“在 BEV 网格中，我关心哪一些 3D 点（格子）”
+        # ref_2d 告诉网络“这些 3D 点在相机图像中对应哪一个像素位置，可以到图像特征图对应像素去采样”
         ref_3d = self.get_reference_points(
             bev_h, bev_w, self.pc_range[5]-self.pc_range[2], self.num_points_in_pillar, dim='3d', bs=bev_query.size(1),  device=bev_query.device, dtype=bev_query.dtype)
         ref_2d = self.get_reference_points(
@@ -185,12 +206,18 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
         # bug: this code should be 'shift_ref_2d = ref_2d.clone()', we keep this bug for reproducing our results in paper.
         shift_ref_2d = ref_2d  # .clone()
+        # 这一步不必要，因为prev_bev和bev已经完成了对齐，prev_bev的ref_2d和bev的ref_2d保持一致就好
         shift_ref_2d += shift[:, None, None, :]
 
         # (num_query, bs, embed_dims) -> (bs, num_query, embed_dims)
         bev_query = bev_query.permute(1, 0, 2)
         bev_pos = bev_pos.permute(1, 0, 2)
+        # -------- 将所有 bev_pos 全部置 0 --------
+        # bev_pos[:] = 0  
+        # --------------------------------------------------
+
         bs, len_bev, num_bev_level, _ = ref_2d.shape
+        # 当存在prev_bev时，将上一时刻prev_bev和当前时刻bev进行cat作为prev_bev
         if prev_bev is not None:
             prev_bev = prev_bev.permute(1, 0, 2)
             prev_bev = torch.stack(
@@ -201,6 +228,40 @@ class BEVFormerEncoder(TransformerLayerSequence):
             hybird_ref_2d = torch.stack([ref_2d, ref_2d], 1).reshape(
                 bs*2, len_bev, num_bev_level, 2)
 
+        # 保存PE前的BEV特征
+        # 为了保证可视化代码的一致性，不更改key的名称和变量维度等信息
+        def save_bev_features(bev_features, img_metas, base_path='/mnt/kuebiko/users/qdeng/GenAD/bev_features_no_pe_0209'):
+            """保存BEV特征
+                Args:
+                    bev_features (Tensor): [bs, H, W, C] BEV特征图
+                    img_metas (list): 包含场景信息的字典列表
+                    base_path (str): 保存路径基准目录
+            """
+            for batch_idx, meta in enumerate(img_metas):
+                scene_token = meta['scene_token']
+                sample_token = meta['sample_idx']
+                
+                lidar_file = meta['pts_filename']
+                timestamp = re.search(r'__(\d+)\.pcd\.bin$', lidar_file).group(1)
+                
+                save_dir = os.path.join(base_path, scene_token)
+                os.makedirs(save_dir, exist_ok=True)
+                
+                save_name = f"{sample_token}_{timestamp}.pth"
+                save_path = os.path.join(save_dir, save_name)
+                
+                # 保存特征
+                save_dict = {
+                    'features': bev_features[batch_idx].detach().cpu(),  # [H, W, C]
+                    'bev_h': bev_h,
+                    'bev_w': bev_w,
+                    'timestamp': timestamp,
+                    'scene_token': scene_token,
+                    'sample_token': sample_token
+                }
+                torch.save(save_dict, save_path)
+
+        # 进入encoder的三层！！！每层包含 ('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm')
         for lid, layer in enumerate(self.layers):
             output = layer(
                 bev_query,
@@ -220,8 +281,19 @@ class BEVFormerEncoder(TransformerLayerSequence):
                 **kwargs)
 
             bev_query = output
+            # bev_query.shape -- [1, 10000, 256]
+        
             if self.return_intermediate:
                 intermediate.append(output)
+
+        bev_feature_map = bev_query.view(
+            bev_query.size(0),  # batch_size
+            bev_h, bev_w,            # 空间维度
+            -1                       # 特征维度
+        )
+        # save BEV features
+        # save_bev_features(bev_feature_map, kwargs['img_metas'])
+
 
         if self.return_intermediate:
             return torch.stack(intermediate)
@@ -346,7 +418,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
         for layer in self.operation_order:
             # temporal self attention
             if layer == 'self_attn':
-
+                # bev_pos.shape -- [1, 10000, 256]
                 query = self.attentions[attn_index](
                     query,
                     prev_bev,

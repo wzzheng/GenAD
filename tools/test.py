@@ -66,7 +66,7 @@ def parse_args():
         action='store_true',
         help='whether to use gpu to collect results.')
     parser.add_argument(
-        '--tmpdir',
+        '--tmpdir',     # 用于从多个worker收集结果的临时目录
         help='tmp directory used for collecting results from multiple '
         'workers, available when gpu-collect is not specified')
     parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -75,7 +75,7 @@ def parse_args():
         action='store_true',
         help='whether to set deterministic options for CUDNN backend.')
     parser.add_argument(
-        '--cfg-options',
+        '--cfg-options',        # 动态修改配置文件的选项
         nargs='+',
         action=DictAction,
         help='override some settings in the used config, the key-value pair '
@@ -238,12 +238,14 @@ def main():
     if not distributed:
         # assert False
         model = MMDataParallel(model, device_ids=[0])
+        # single_gpu_test函数默认在torch.no_grad() 环境中运行？
         outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
     else:
         model = MMDistributedDataParallel(
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
+        # custom_multi_gpu_test函数默认在torch.no_grad() 环境中运行？
         outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
                                         args.gpu_collect)
 

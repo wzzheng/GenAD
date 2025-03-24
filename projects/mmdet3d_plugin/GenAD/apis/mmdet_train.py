@@ -7,7 +7,7 @@ import torch.distributed as dist
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (HOOKS, DistSamplerSeedHook, EpochBasedRunner,
                          Fp16OptimizerHook, OptimizerHook, build_optimizer,
-                         build_runner, get_dist_info)
+                         build_runner, get_dist_info,Hook)
 from mmcv.utils import build_from_cfg
 
 from mmdet.core import EvalHook
@@ -20,6 +20,26 @@ import os.path as osp
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from projects.mmdet3d_plugin.core.evaluation.eval_hooks import CustomDistEvalHook
 from projects.mmdet3d_plugin.datasets.builder import custom_build_dataset
+
+@HOOKS.register_module()
+class MergeResultsHook(Hook):
+    """每个epoch结束后合并多GPU结果的钩子"""
+    
+    def __init__(self):
+        pass
+    
+    def after_train_epoch(self, runner):
+        """在每个训练epoch结束后调用"""
+        # 确保只在主进程执行
+        if runner.rank == 0:
+            epoch = runner.epoch
+            model = runner.model.module if hasattr(runner.model, 'module') else runner.model
+            print(f"合并epoch {epoch}的结果...")
+            if hasattr(model, 'merge_inference_results'):
+                model.merge_inference_results(epoch=epoch)
+            else:
+                print(f"警告: 模型没有merge_inference_results方法")
+
 def custom_train_detector(model,
                    dataset,
                    cfg,
@@ -158,7 +178,7 @@ def custom_train_detector(model,
                 cfg.data.val.pipeline)
         val_dataset = custom_build_dataset(cfg.data.val, dict(test_mode=True))
 
-        val_dataloader = build_dataloader(
+        val_dataloader = build_dataloader(      # 创建GenADCustomNuScenesDataset类的实例
             val_dataset,
             samples_per_gpu=val_samples_per_gpu,
             workers_per_gpu=cfg.data.workers_per_gpu,
@@ -170,6 +190,7 @@ def custom_train_detector(model,
         eval_cfg = cfg.get('evaluation', {})
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
         eval_cfg['jsonfile_prefix'] = osp.join('val', cfg.work_dir, time.ctime().replace(' ','_').replace(':','_'))
+        # 创建评估钩子并注册
         eval_hook = CustomDistEvalHook if distributed else EvalHook
         runner.register_hook(eval_hook(val_dataloader, **eval_cfg))
 
