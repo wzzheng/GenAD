@@ -166,14 +166,39 @@ class GenAD(MVXTwoStageDetector):
         # GenADHead --> DETRHead --> BaseDenseHead --> BaseHead --> torch.nn.Module
         # nn.Module 的 __call__ 方法将调用子类中定义的 forward 方法
         # 从pts_bbox_head进入下一环节BEVFormerHead（包含encoder、decoder）
+        # ego_fut_trajs是轨迹gt，定义在GenAD_config.py中，从数据集中读取
         outs = self.pts_bbox_head(pts_feats, img_metas, prev_bev,
                                   ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat,
                                   gt_labels_3d=gt_labels_3d, gt_attr_labels=gt_attr_labels,
                                   ego_fut_trajs=ego_fut_trajs)
+        
+        # outs = {
+        #     # 'bev_embed': bev_embed,                                                               # [10000, 1, 256]
+        #     # 'bev_embed': bev_embed_t,                                                               # [10000, 1, 256]
+        #     'bev_embed': bev_embed_t_p,                                                               # [10000, 1, 256]
+        #     'all_cls_scores': outputs_classes,                                                      # [3, 1, 300, 10]
+        #     'all_bbox_preds': outputs_coords,                                                       # [3, 1, 300, 10], agents当前位置等检测结果
+        #     'all_traj_preds': outputs_trajs.repeat(outputs_coords.shape[0], 1, 1, 1, 1),            # [3, 1, 300, 6, 12],agents预测轨迹
+        #     'all_traj_cls_scores': outputs_trajs_classes.repeat(outputs_coords.shape[0], 1, 1, 1),  # [3, 1, 300, 6]
+        #     'map_all_cls_scores': map_outputs_classes,                                              # [3, 1, 100, 3]
+        #     'map_all_bbox_preds': map_outputs_coords,                                               # [3, 1, 100, 4]
+        #     'map_all_pts_preds': map_outputs_pts_coords,                                            # [3, 1, 100, 20, 2],地图元素
+        #     'enc_cls_scores': None,
+        #     'enc_bbox_preds': None,
+        #     'map_enc_cls_scores': None,
+        #     'map_enc_bbox_preds': None,
+        #     'map_enc_pts_preds': None,
+        #     'ego_fut_preds': ego_trajs,                                                             # ego的预测轨迹值，shape-[1, 3, 6, 2]
+        #     'loss_vae_gen': distribution_comp,                                                      # present_mu[1,1,32]/present_log_sigma[1,1,32]/future_mu[1,1,32]/future_log_sigma[1,1,32]
+        #     'lateral_shift': lateral_shift,                                                         # 保存偏移量
+        #     'recovery_ego_trajs': recovery_ego_trajs,       # 添加恢复轨迹
+        #     'padding_mode': padding_mode,  # 记录使用的填充模式
+        # }
+
         loss_inputs = [
-            gt_bboxes_3d, gt_labels_3d,                 # detection Head的监督信号
+            gt_bboxes_3d, gt_labels_3d,                 # detection Head的监督信号（即GT）
             map_gt_bboxes_3d, map_gt_labels_3d,         # map detection Head的监督信号
-            outs,                                       # pts_bbox_head的输出，包含了bev_embed
+            outs,                                       # （*对应GenAD_head.py中loss方法的preds_dicts这个参数）pts_bbox_head的输出，包含了bev_embed
             ego_fut_trajs, ego_fut_masks, ego_fut_cmd,  # future generation的监督信号
             gt_attr_labels,                             # instance encoder的监督信号?    
         ]
@@ -646,7 +671,7 @@ class GenAD(MVXTwoStageDetector):
                 
                     # 4. 保存lateral_shift信息
                     if 'lateral_shift' in outs:
-                        print(f"outs['lateral_shift'] = {outs['lateral_shift']}")
+                        # print(f"outs['lateral_shift'] = {outs['lateral_shift']}")
                         if 'lateral_shift' not in self.visualization_results:
                             self.visualization_results['lateral_shift'] = {}
                         self.visualization_results['lateral_shift'][sample_token] = outs['lateral_shift'][i].detach().cpu()
@@ -693,7 +718,7 @@ class GenAD(MVXTwoStageDetector):
                             combined_results['results'].update(results['results'])
                             combined_results['map_results'].update(results['map_results'])
                             combined_results['plan_results'].update(results['plan_results'])
-                            combined_results['lateral_shift'].update(results['lateral_shift'])  # 添加这一行
+                            combined_results['lateral_shift'].update(results['lateral_shift'])  
                         
                         save_file = os.path.join(save_path, f'iter_{iter_num}.pkl')
                         mmcv.dump(combined_results, save_file)

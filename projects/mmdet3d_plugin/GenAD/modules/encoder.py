@@ -417,6 +417,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
 
         for layer in self.operation_order:
             # temporal self attention
+            # 用于增强BEV特征的空间感知,使模型能够区分"前方"和"后方"等空间位置
             if layer == 'self_attn':
                 # bev_pos.shape -- [1, 10000, 256]
                 query = self.attentions[attn_index](
@@ -424,8 +425,8 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                     prev_bev,
                     prev_bev,
                     identity if self.pre_norm else None,
-                    query_pos=bev_pos,
-                    key_pos=bev_pos,
+                    query_pos=bev_pos,                  # 位置编码作为query的位置增强
+                    key_pos=bev_pos,                    # 位置编码作为key的位置增强
                     attn_mask=attn_masks[attn_index],
                     key_padding_mask=query_key_padding_mask,
                     reference_points=ref_2d,
@@ -441,14 +442,16 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 norm_index += 1
 
             # spaital cross attention
+            # 在空间注意力机制中，不使用传统位置编码，而是使用更精确的ref_3d和reference_points_cam作为空间定位机制
+            # 提供了更精确的3D-2D映射关系
             elif layer == 'cross_attn':
                 query = self.attentions[attn_index](
                     query,
                     key,
                     value,
                     identity if self.pre_norm else None,
-                    query_pos=query_pos,
-                    key_pos=key_pos,
+                    query_pos=query_pos,                # 传入的是None，不使用位置编码
+                    key_pos=key_pos,                    # 传入的是None，不使用位置编码
                     reference_points=ref_3d,
                     reference_points_cam=reference_points_cam,
                     mask=mask,

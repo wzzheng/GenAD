@@ -454,7 +454,7 @@ find_unused_parameters = True
 checkpoint_config = dict(interval=1, max_keep_ckpts=total_epochs)
 
 # load_from = "/mnt/kuebiko/users/qdeng/GenAD/ckpts/bevformer_r101_dcn_24ep.pth"         # BEVFormer
-load_from = "/mnt/kuebiko/users/qdeng/GenAD/ckpts/genad_checkpoints.pth"
+load_from = "/mnt/kuebiko/users/qdeng/GenAD/ckpts/genad_checkpoint.pth"
 
 # CustomSetEpochInfoHook这个类定义在/GenAD/projects/mmdet3d_plugin/GenAD/hooks/custom_hooks.py文件中
 custom_hooks = [dict(type='CustomSetEpochInfoHook'),
