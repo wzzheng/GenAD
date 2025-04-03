@@ -2597,7 +2597,7 @@ class GenADHead(DETRHead):
         # 无padding
         # bev_embed_t = self.se2_transform(bev_embed, T)  # T是自车位置偏移的变换矩阵
         # 有padding
-        # bev_embed_t_p = self.improved_se2_transform(bev_embed, T, padding_mode=padding_mode)
+        bev_embed_t_p = self.improved_se2_transform(bev_embed, T, padding_mode=padding_mode)
 
         # bev_embed.shape --[10000, 1, 256]，10000代表100*100个grid，1代表1个batch，256代表特征维度
         # config文件中设置了bev_h_ = 100，bev_w_ = 100
