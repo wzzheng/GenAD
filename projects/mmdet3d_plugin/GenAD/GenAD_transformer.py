@@ -79,6 +79,13 @@ class MapDetectionTransformerDecoder(TransformerLayerSequence):
                 return_intermediate is `False`, otherwise it has shape
                 [num_layers, num_query, bs, embed_dims].
         """
+        # 该模块目的：通过多个Transformer层，模型可以逐步改进对地图元素位置的预测。
+        # 每一层都接收前一层的预测结果，然后通过应用回归分支产生的偏移量来细化这些预测。
+
+        # query：输入的查询嵌入，形状为(num_query, bs, embed_dims)，代表初始的地图元素特征
+        # reference_points：初始参考点坐标，表示2D空间中的位置预测
+        # reg_branches：回归分支网络，用于细化位置预测
+        # key_padding_mask：在注意力机制中用于忽略某些关键元素的掩码
         output = query
         intermediate = []
         intermediate_reference_points = []
@@ -95,18 +102,21 @@ class MapDetectionTransformerDecoder(TransformerLayerSequence):
             output = output.permute(1, 0, 2)
 
             if reg_branches is not None:
+                # 应用回归分支预测偏移量
                 tmp = reg_branches[lid](output)
 
                 assert reference_points.shape[-1] == 2
 
                 new_reference_points = torch.zeros_like(reference_points)
+                # 关键步骤：将预测的偏移量添加到逆sigmoid变换后的参考点上
                 new_reference_points[..., :2] = tmp[
                     ..., :2] + inverse_sigmoid(reference_points[..., :2])
                 # new_reference_points[..., 2:3] = tmp[
                 #     ..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
-
+                
+                # 应用sigmoid确保坐标在[0,1]范围内
                 new_reference_points = new_reference_points.sigmoid()
-
+                # 更新参考点（detach停止梯度流）
                 reference_points = new_reference_points.detach()
 
             output = output.permute(1, 0, 2)
@@ -453,20 +463,22 @@ class GenADPerceptionTransformer(BaseModule):
 
         # bev_embed.shape - [1,10000,256]
         bs = mlvl_feats[0].size(0)
+        # 3D detection查询处理
         query_pos, query = torch.split(
             object_query_embed, self.embed_dims, dim=1)
         query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
         query = query.unsqueeze(0).expand(bs, -1, -1)
-        reference_points = self.reference_points(query_pos)
+        reference_points = self.reference_points(query_pos)     # 3D空间
         reference_points = reference_points.sigmoid()
         init_reference_out = reference_points
 
+        # map semantic segmentation查询处理
         map_query_pos, map_query = torch.split(
             map_query_embed, self.embed_dims, dim=1)
         map_query_pos = map_query_pos.unsqueeze(0).expand(bs, -1, -1)
         map_query = map_query.unsqueeze(0).expand(bs, -1, -1)
         map_reference_points = self.map_reference_points(map_query_pos)
-        map_reference_points = map_reference_points.sigmoid()
+        map_reference_points = map_reference_points.sigmoid()   # 2D地图空间
         map_init_reference_out = map_reference_points        
 
         query = query.permute(1, 0, 2)
@@ -475,6 +487,7 @@ class GenADPerceptionTransformer(BaseModule):
         map_query_pos = map_query_pos.permute(1, 0, 2)
         bev_embed = bev_embed.permute(1, 0, 2)
 
+        # 3D detection decoder
         if self.decoder is not None:
             # [L, Q, B, D], [L, B, Q, D]
             # 调用DetectionTransformerDecoder的forward函数
@@ -482,7 +495,7 @@ class GenADPerceptionTransformer(BaseModule):
             inter_states, inter_references = self.decoder(
                 query=query,
                 key=None,
-                value=bev_embed,
+                value=bev_embed,            # bev_embed影响解码器输出
                 query_pos=query_pos,
                 reference_points=reference_points,
                 reg_branches=reg_branches,
@@ -495,13 +508,14 @@ class GenADPerceptionTransformer(BaseModule):
             inter_states = query.unsqueeze(0)
             inter_references_out = reference_points.unsqueeze(0)
 
+        # map decoder
         if self.map_decoder is not None:
             # [L, Q, B, D], [L, B, Q, D]
             # 调用MapDetectionTransformerDecoder
             map_inter_states, map_inter_references = self.map_decoder(
                 query=map_query,
                 key=None,
-                value=bev_embed,
+                value=bev_embed,            # bev_embed影响解码器输出
                 query_pos=map_query_pos,
                 reference_points=map_reference_points,
                 reg_branches=map_reg_branches,

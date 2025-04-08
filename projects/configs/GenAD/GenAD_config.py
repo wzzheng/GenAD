@@ -42,7 +42,7 @@ _num_levels_ = 1
 bev_h_ = 100
 bev_w_ = 100
 queue_length = 3 # each sequence contains `queue_length` frames.
-total_epochs = 1
+total_epochs = 10
 
 model = dict(
     type='GenAD',
@@ -202,7 +202,7 @@ model = dict(
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm'))),
-            # DetectionTransformerDecoder
+            # DetectionTransformerDecoder,预测物体类别和边界框
             decoder=dict(
                 type='DetectionTransformerDecoder',
                 num_layers=3,
@@ -224,7 +224,7 @@ model = dict(
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm'))),
-            # MapDetectionTransformerDecoder
+            # MapDetectionTransformerDecoder,预测地图元素（分隔线、人行横道、边界）
             map_decoder=dict(
                 type='MapDetectionTransformerDecoder',
                 num_layers=3,
@@ -291,10 +291,12 @@ model = dict(
         loss_map_iou=dict(type='GIoULoss', loss_weight=0.0),
         loss_map_pts=dict(type='PtsL1Loss', loss_weight=1.0),
         loss_map_dir=dict(type='PtsDirCosLoss', loss_weight=0.005),
+        # 规划相关损失函数
         loss_plan_reg=dict(type='L1Loss', loss_weight=1.0),
         loss_plan_bound=dict(type='PlanMapBoundLoss', loss_weight=1.0, dis_thresh=1.0),
         loss_plan_col=dict(type='PlanCollisionLoss', loss_weight=1.0),
         loss_plan_dir=dict(type='PlanMapDirectionLoss', loss_weight=0.5),
+        # 生成模型相关损失函数
         loss_vae_gen=dict(type='ProbabilisticLoss', loss_weight=1.0),
         loss_diff_gen=dict(type='DiffusionLoss', loss_weight=0.5)),
     # model training and testing settings

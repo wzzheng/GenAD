@@ -961,7 +961,7 @@ class GenAD(MVXTwoStageDetector):
             bbox_result['labels_3d'] = bbox_result['labels_3d'][mask]
             bbox_result['trajs_3d'] = bbox_result['trajs_3d'][mask]
 
-            # 将预测结果与 Ground Truth 进行匹配
+            ## 匹配预测和真值框
             matched_bbox_result = self.assign_pred_to_gt_vip3d(
                 bbox_result, gt_bbox, gt_label)
             
@@ -1136,7 +1136,8 @@ class GenAD(MVXTwoStageDetector):
             box_name = mapped_class_names[pred_bbox['labels_3d'][i]]
             if box_name in ignore_list:
                 continue
-            if i not in matched_bbox_result:          # 统计误检(False Positive)
+            # 计算假阳性
+            if i not in matched_bbox_result:          # 统计误检(False Positive)(预测未匹配到GT)
                 metric_dict['fp_'+box_name] += 1
 
         # 初始化轨迹数据字典，使用img_metas中的信息
@@ -1164,6 +1165,7 @@ class GenAD(MVXTwoStageDetector):
 
 
         # 遍历一个sample的所有真实框
+        # 计算轨迹预测精度
         for i in range(gt_label.shape[0]):
             # 统一车辆类别
             gt_label[i] = 0 if gt_label[i] in veh_list else gt_label[i]
@@ -1275,12 +1277,14 @@ class GenAD(MVXTwoStageDetector):
 
                 # 如果所有时间步都有效，计算最终位移误差(FDE)和命中率(Hit)
                 if num_valid_ts == self.fut_ts:
-                    fde = dist[:, -1].min()
+                    # 计算FDE（最终位移误差）
+                    fde = dist[:, -1].min()  # 最终时刻的最小误差
                     metric_dict['cnt_fde_'+box_name] += 1
                     metric_dict['FDE_'+box_name] += fde
-                    if fde <= match_dis_thresh:
+                    # 计算命中率
+                    if fde <= match_dis_thresh:             # 如果FDE小于阈值，认为命中
                         metric_dict['hit_'+box_name] += 1
-                    else:
+                    else:                                   # 否则认为未命中        
                         metric_dict['MR_'+box_name] += 1
 
         return metric_dict
