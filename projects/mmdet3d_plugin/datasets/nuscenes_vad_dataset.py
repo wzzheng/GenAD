@@ -977,6 +977,7 @@ class v1CustomDetectionConfig:
             raise Exception('Error: Unknown distance function %s!' % self.dist_fcn)
 
 @DATASETS.register_module()
+# 先调用__init__方法，然后调用__getitem__方法
 class GenADCustomNuScenesDataset(NuScenesDataset):
     r"""Custom NuScenes Dataset.
     """
@@ -1125,6 +1126,7 @@ class GenADCustomNuScenesDataset(NuScenesDataset):
         data_queue = []
 
         # temporal aug
+        # 一个样本中的三个sample确实是同一场景下的sample，但它们不一定是严格连续的时间戳。
         prev_indexs_list = list(range(index-self.queue_length, index))
         random.shuffle(prev_indexs_list)
         prev_indexs_list = sorted(prev_indexs_list[1:], reverse=True)
@@ -1148,6 +1150,7 @@ class GenADCustomNuScenesDataset(NuScenesDataset):
             input_dict = self.get_data_info(i)
             if input_dict is None:
                 return None
+            # 帧索引是递减的（但不一定连续）
             if input_dict['frame_idx'] < frame_idx and input_dict['scene_token'] == scene_token:
                 self.pre_pipeline(input_dict)
                 example = self.pipeline(input_dict)
@@ -1761,6 +1764,7 @@ class GenADCustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict[str, float]: Results of each evaluation metric.
         """
+        # print("结果是:", results)
         result_metric_names = ['EPA', 'ADE', 'FDE', 'MR']
         motion_cls_names = ['car', 'pedestrian']
         motion_metric_names = ['gt', 'cnt_ade', 'cnt_fde', 'hit',
@@ -1776,10 +1780,28 @@ class GenADCustomNuScenesDataset(NuScenesDataset):
         
         alpha = 0.5
 
+        # 汇总所有样本的指标
+        # === 原版 ===
+        # 这段代码对应的results是一个列表，而results实际上是一个字典
         for i in range(len(results)):
             for key in all_metric_dict.keys():
                 all_metric_dict[key] += results[i]['metric_results'][key]
-        
+
+        # ===joy修改版===
+        # 检查results是字典还是列表
+        # if isinstance(results, dict):            # 如果results是字典
+        #     if 'metric_results' in results:
+        #         for key in all_metric_dict.keys():
+        #             if key in results['metric_results']:
+        #                 all_metric_dict[key] += results['metric_results'][key]
+        # else:                                    # 如果results是列表
+        #     for i in range(len(results)):
+        #         if 'metric_results' in results[i]:
+        #             for key in all_metric_dict.keys():
+        #                 if key in results[i]['metric_results']:
+        #                     all_metric_dict[key] += results[i]['metric_results'][key]    
+
+        # === 原版 ===
         for cls in motion_cls_names:
             result_dict['EPA_'+cls] = (all_metric_dict['hit_'+cls] - \
                  alpha * all_metric_dict['fp_'+cls]) / all_metric_dict['gt_'+cls]
@@ -1787,6 +1809,21 @@ class GenADCustomNuScenesDataset(NuScenesDataset):
             result_dict['FDE_'+cls] = all_metric_dict['FDE_'+cls] / all_metric_dict['cnt_fde_'+cls]
             result_dict['MR_'+cls] = all_metric_dict['MR_'+cls] / all_metric_dict['cnt_fde_'+cls]
         
+        # === joy修改版 ===
+        # for cls in motion_cls_names:
+        #     # 添加除零保护
+        #     if all_metric_dict['gt_'+cls] > 0:
+        #         result_dict['EPA_'+cls] = (all_metric_dict['hit_'+cls] - \
+        #             alpha * all_metric_dict['fp_'+cls]) / all_metric_dict['gt_'+cls]
+        #         result_dict['ADE_'+cls] = all_metric_dict['ADE_'+cls] / all_metric_dict['cnt_ade_'+cls]
+        #         result_dict['FDE_'+cls] = all_metric_dict['FDE_'+cls] / all_metric_dict['cnt_fde_'+cls]
+        #         result_dict['MR_'+cls] = all_metric_dict['MR_'+cls] / all_metric_dict['cnt_fde_'+cls]
+        #     else:
+        #         result_dict['EPA_'+cls] = 0.0  # 或设置为NaN: float('nan')
+        #         result_dict['ADE_'+cls] = 0.0
+        #         result_dict['FDE_'+cls] = 0.0
+        #         result_dict['MR_'+cls] = 0.0
+
         print('\n')
         print('-------------- Motion Prediction --------------')
         for k, v in result_dict.items():
@@ -1797,6 +1834,27 @@ class GenADCustomNuScenesDataset(NuScenesDataset):
         print('-------------- Planning --------------')
         metric_dict = None
         num_valid = 0
+
+        # === joy修改版 ===
+        # 检查results类型
+        # if isinstance(results, dict):
+        #     # 字典情况
+        #     print("results['metric_results']:", results['metric_results'])
+        #     if 'metric_results' in results and results['metric_results'].get('fut_valid_flag', False):
+        #         num_valid = 1
+        #         metric_dict = copy.deepcopy(results['metric_results'])
+        # else:
+        #     # 列表情况
+        #     for res in results:
+        #         if 'metric_results' in res and res['metric_results'].get('fut_valid_flag', False):
+        #             num_valid += 1
+        #             if metric_dict is None:
+        #                 metric_dict = copy.deepcopy(res['metric_results'])
+        #             else:
+        #                 for k in res['metric_results'].keys():
+        #                     metric_dict[k] += res['metric_results'][k]
+
+        # === 原版 ===
         for res in results:
             if res['metric_results']['fut_valid_flag']:
                 num_valid += 1
@@ -1808,6 +1866,7 @@ class GenADCustomNuScenesDataset(NuScenesDataset):
                 for k in res['metric_results'].keys():
                     metric_dict[k] += res['metric_results'][k]
         
+        print("metric_dict:", metric_dict)
         for k in metric_dict:
             metric_dict[k] = metric_dict[k] / num_valid
             print("{}:{}".format(k, metric_dict[k]))

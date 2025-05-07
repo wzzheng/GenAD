@@ -16,6 +16,10 @@ from projects.mmdet3d_plugin.GenAD.modules.temporal_self_attention import Tempor
 from projects.mmdet3d_plugin.GenAD.modules.spatial_cross_attention import MSDeformableAttention3D
 
 
+import os
+import re
+import torch
+
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 
@@ -118,6 +122,7 @@ class MapDetectionTransformerDecoder(TransformerLayerSequence):
 
 
 @TRANSFORMER.register_module()
+# 类比UniAD中的PerceptionTransformer（定义在/UniAD/projects/mmdet3d_plugin/uniad/modules/transformer.py中）
 class GenADPerceptionTransformer(BaseModule):
     """Implements the Detr3D transformer.
     Args:
@@ -174,8 +179,15 @@ class GenADPerceptionTransformer(BaseModule):
 
     def init_layers(self):
         """Initialize layers of the Detr3DTransformer."""
+        # nn.Parameter 是一个特殊的张量（tensor）对象，用于指示这个张量是可训练参数，需要在训练中进行反向传播和梯度更新
+        # 当把一个 nn.Parameter 赋值给某个 nn.Module（比如网络模型）内部的属性时，这个张量就会被自动识别为模型的参数，出现在 model.parameters() 列表中
+        
+        # 用于增强图像特征的level_embeds
+        # 用于区分不同特征层/level（如 FPN 的 P2、P3、P4、P5 等不同分辨率输出，或者多尺度特征图）
         self.level_embeds = nn.Parameter(torch.Tensor(
             self.num_feature_levels, self.embed_dims))
+        # 用于增强图像特征的cams_embeds
+        # 用于区分不同相机视角的特征
         self.cams_embeds = nn.Parameter(
             torch.Tensor(self.num_cams, self.embed_dims))
         self.reference_points = nn.Linear(self.embed_dims, 3)
@@ -223,78 +235,111 @@ class GenADPerceptionTransformer(BaseModule):
         obtain bev features.
         """
 
+        # mlvl_feats[0]的shape是[B, N, C, H, W]
+        # B -- batch size, N -- num_cams, C -- 特征通道数, H -- 特征图高度, W -- 特征图宽度
         bs = mlvl_feats[0].size(0)
         bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
         bev_pos = bev_pos.flatten(2).permute(2, 0, 1)
 
+        # bev_queries.shape--[10000,1,256]
+
+        # 1. 处理ego运动补偿
+        # 空间位移补偿，目的是让当前帧的BEV特征能够与上一帧在空间位置上对齐
         # obtain rotation angle and shift with ego motion
-        delta_x = np.array([each['can_bus'][0]
+        delta_x = np.array([each['can_bus'][0]                  # x轴方向的位移，单位：m
                            for each in kwargs['img_metas']])
-        delta_y = np.array([each['can_bus'][1]
+        delta_y = np.array([each['can_bus'][1]                  # y轴方向的位移，单位：m
                            for each in kwargs['img_metas']])
-        ego_angle = np.array(
+        ego_angle = np.array(                                   # ego车辆的角度，单位：°
             [each['can_bus'][-2] / np.pi * 180 for each in kwargs['img_metas']])
-        grid_length_y = grid_length[0]
-        grid_length_x = grid_length[1]
-        translation_length = np.sqrt(delta_x ** 2 + delta_y ** 2)
-        translation_angle = np.arctan2(delta_y, delta_x) / np.pi * 180
+        # 获取BEV视图中每个网格的实际物理尺寸
+        grid_length_y = grid_length[0]                                  # 单位：m/格
+        grid_length_x = grid_length[1]                                  # 单位：m/格
+        translation_length = np.sqrt(delta_x ** 2 + delta_y ** 2)       # 计算位移距离，单位：m
+        translation_angle = np.arctan2(delta_y, delta_x) / np.pi * 180  # 计算位移方向角度，单位：°
+        # 计算bev视图中的位移
         bev_angle = ego_angle - translation_angle
+        # 计算网格偏移量
         shift_y = translation_length * \
             np.cos(bev_angle / 180 * np.pi) / grid_length_y / bev_h
         shift_x = translation_length * \
             np.sin(bev_angle / 180 * np.pi) / grid_length_x / bev_w
+        
         shift_y = shift_y * self.use_shift
         shift_x = shift_x * self.use_shift
+        # 创建shift张量
         shift = bev_queries.new_tensor(
             [shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
 
+        #其实用不到shift，因为prev_bev存在时只进行了rotation操作，并未平移到bev
+        #因此后续prev_bev的ref_2d也不需要shift到当前时刻
+
+        # 2. 处理时序对齐，如果存在上一帧BEV特征,进行旋转对齐
+        # 视角变化补偿，目的是补偿由于自车转向导致的视角变化（关注rotation）
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:
                 prev_bev = prev_bev.permute(1, 0, 2)
             if self.rotate_prev_bev:
                 for i in range(bs):
                     # num_prev_bev = prev_bev.size(1)
+                    # 获取旋转角度
                     rotation_angle = kwargs['img_metas'][i]['can_bus'][-1]
+                    # 重塑特征图
                     tmp_prev_bev = prev_bev[:, i].reshape(
                         bev_h, bev_w, -1).permute(2, 0, 1)
+                    # 旋转BEV特征
                     tmp_prev_bev = rotate(tmp_prev_bev, rotation_angle,
-                                          center=self.rotate_center)
+                                        center=self.rotate_center)
+                    # 恢复原始维度顺序
                     tmp_prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(
                         bev_h * bev_w, 1, -1)
                     prev_bev[:, i] = tmp_prev_bev[:, 0]
 
+        # 3. 融合can bus信息
         # add can bus signals
         can_bus = bev_queries.new_tensor(
             [each['can_bus'] for each in kwargs['img_metas']])  # [:, :]
         can_bus = self.can_bus_mlp(can_bus)[None, :, :]
+        # 以广播的方式在bev_queries中融入了can_bus信息
         bev_queries = bev_queries + can_bus * self.use_can_bus
 
+        # 图像特征处理
         feat_flatten = []
         spatial_shapes = []
         for lvl, feat in enumerate(mlvl_feats):
             bs, num_cam, c, h, w = feat.shape
             spatial_shape = (h, w)
             feat = feat.flatten(3).permute(1, 0, 3, 2)
+            # cams_embeds.shape -- torch.Size([6,256]),添加cam编码
             if self.use_cams_embeds:
                 feat = feat + self.cams_embeds[:, None, None, :].to(feat.dtype)
+            # level_embeds.shape -- torch.Size([4,256])，添加level编码，num_level=1
             feat = feat + self.level_embeds[None,
                                             None, lvl:lvl + 1, :].to(feat.dtype)
             spatial_shapes.append(spatial_shape)
             feat_flatten.append(feat)
-
+        # 将不同level上的在C通道上进行cat操作
         feat_flatten = torch.cat(feat_flatten, 2)
         spatial_shapes = torch.as_tensor(
             spatial_shapes, dtype=torch.long, device=bev_pos.device)
+        # 将不同（H, W）的平面flatten为（H*W）的向量后cat在一起
         level_start_index = torch.cat((spatial_shapes.new_zeros(
             (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
 
         feat_flatten = feat_flatten.permute(
             0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
 
+        # 4. 通过encoder更新BEV特征
+        # 进到/mnt/kuebiko/users/qdeng/GenAD/projects/mmdet3d_plugin/GenAD/modules/encoder.py的forward函数
+        # ---encoder功能---
+        # BEV encoder的作用：PE / MultiHeadAttention(通过 self-attention 机制处理 bev_queries 和 feat_flatten 之间的关系) / 特征融合(SCA + TSA) / FFN
+        # 生成 ref_3d 和 ref_2d，供后续 TSA、CSA 模块中的 deformable attentiuon 采样使用；
+        # 利用6个相机的内参、外参，将真实尺度下的 ref_3d 从自车坐标系（Lidar坐标系）投影到6个相机的像素坐标系内，判断哪些点会出现在哪些相机内，该信息体现在 bev_mask 内；
+        # 循环进入3个相同的 BEVFormerLayer 模块，一个 BEVFormerLayer 包含 (‘self_attn’, ‘norm’, ‘cross_attn’, ‘norm’, ‘ffn’, ‘norm’)。
         bev_embed = self.encoder(
             bev_queries,
-            feat_flatten,
-            feat_flatten,
+            feat_flatten,       # key
+            feat_flatten,       # value
             bev_h=bev_h,
             bev_w=bev_w,
             bev_pos=bev_pos,
@@ -304,6 +349,41 @@ class GenADPerceptionTransformer(BaseModule):
             shift=shift,
             **kwargs
         )
+        # 为了保证可视化代码的一致性，不更改key的名称和变量维度等信息
+        def save_bev_features(bev_features, img_metas, bev_h, bev_w, base_path='/mnt/kuebiko/users/qdeng/GenAD/bev_features_0212'):
+            """保存BEV特征
+            Args:
+                bev_features (Tensor): [H*W, bs, C] = [10000,1,256]BEV特征图
+                img_metas (list): 包含场景信息的字典列表
+                bev_h (int): BEV特征图高度
+                bev_w (int): BEV特征图宽度
+                base_path (str): 保存路径基准目录
+            """
+            for batch_idx, meta in enumerate(img_metas):
+                scene_token = meta['scene_token']
+                sample_token = meta['sample_idx']
+                
+                lidar_file = meta['pts_filename']
+                timestamp = re.search(r'__(\d+)\.pcd\.bin$', lidar_file).group(1)
+                
+                save_dir = os.path.join(base_path, scene_token)
+                os.makedirs(save_dir, exist_ok=True)
+                
+                save_name = f"{sample_token}_{timestamp}.pth"
+                save_path = os.path.join(save_dir, save_name)
+                
+                # 保存特征
+                save_dict = {
+                    'features': bev_features.detach().cpu(),  
+                    'bev_h': bev_h,
+                    'bev_w': bev_w,
+                    'timestamp': timestamp,
+                    'scene_token': scene_token,
+                    'sample_token': sample_token
+                }
+                torch.save(save_dict, save_path)
+        
+        # save_bev_features(bev_embed, kwargs['img_metas'], 100, 100)
 
         return bev_embed
 
@@ -371,6 +451,7 @@ class GenADPerceptionTransformer(BaseModule):
             prev_bev=prev_bev,
             **kwargs)  # bev_embed shape: bs, bev_h*bev_w, embed_dims
 
+        # bev_embed.shape - [1,10000,256]
         bs = mlvl_feats[0].size(0)
         query_pos, query = torch.split(
             object_query_embed, self.embed_dims, dim=1)
@@ -396,6 +477,8 @@ class GenADPerceptionTransformer(BaseModule):
 
         if self.decoder is not None:
             # [L, Q, B, D], [L, B, Q, D]
+            # 调用DetectionTransformerDecoder的forward函数
+            # decoder指向DetectionTransformerDecoder这个类，定义在projects/mmdet3d_plugin/GenAD/modules/decoder.py文件中
             inter_states, inter_references = self.decoder(
                 query=query,
                 key=None,
@@ -414,6 +497,7 @@ class GenADPerceptionTransformer(BaseModule):
 
         if self.map_decoder is not None:
             # [L, Q, B, D], [L, B, Q, D]
+            # 调用MapDetectionTransformerDecoder
             map_inter_states, map_inter_references = self.map_decoder(
                 query=map_query,
                 key=None,

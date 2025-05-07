@@ -85,7 +85,27 @@ class CustomDistEvalHook(BaseDistEvalHook):
             print('\n')
             runner.log_buffer.output['eval_iter_num'] = len(self.dataloader)
 
-            key_score = self.evaluate(runner, results)
+            # 检查并修复结果
+            if isinstance(results, dict) and 'bbox_results' in results:
+                processed_results = []
+                for result in results['bbox_results']:
+                    # 确保有 metric_results 键
+                    if 'metric_results' in result:
+                        # 测试结果中 fut_valid_flag 应该是 True，但在评估阶段被错误地变成了 False，强制修复
+                        if 'fut_valid_flag' in result['metric_results']:
+                            result['metric_results']['fut_valid_flag'] = True
+                    processed_results.append(result)
+                key_score = self.evaluate(runner, processed_results)
+            else:
+                key_score = self.evaluate(runner, results)
+
+            # if isinstance(results, dict) and 'bbox_results' in results:
+            #     processed_results = results['bbox_results']  # 提取 bbox_results 列表
+            # else:
+            #     processed_results = results
+
+            key_score = self.evaluate(runner, processed_results)
+            # key_score = self.evaluate(runner, results)
 
             if self.save_best:
                 self._save_ckpt(runner, key_score)

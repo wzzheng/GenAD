@@ -109,7 +109,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-
+    
+    # 加载配置
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
@@ -221,6 +222,7 @@ def main():
     meta['seed'] = args.seed
     meta['exp_name'] = osp.basename(args.config)
 
+    # 构建模型
     model = build_model(
         cfg.model,
         train_cfg=cfg.get('train_cfg'),
@@ -260,6 +262,7 @@ def main():
             if hasattr(datasets[0], 'PALETTE') else None)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    # *** 负责处理整个训练流程 ***
     custom_train_model(
         model,
         datasets,
