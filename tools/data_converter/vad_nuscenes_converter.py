@@ -47,7 +47,7 @@ def create_nuscenes_infos(root_path,
                           out_path,
                           can_bus_root_path,
                           info_prefix,
-                          version='v1.0-trainval',
+                          version='v1.0-mini',
                           max_sweeps=10):
     """Create info file of nuscene dataset.
 
@@ -975,6 +975,7 @@ args = parser.parse_args()
 
 if __name__ == '__main__':
     if args.dataset == 'nuscenes' and args.version != 'v1.0-mini':
+        # 训练集准备
         train_version = f'{args.version}-trainval'
         nuscenes_data_prep(
             root_path=args.root_path,
@@ -984,6 +985,7 @@ if __name__ == '__main__':
             dataset_name='NuScenesDataset',
             out_dir=args.out_dir,
             max_sweeps=args.max_sweeps)
+        # 测试集准备
         test_version = f'{args.version}-test'
         nuscenes_data_prep(
             root_path=args.root_path,

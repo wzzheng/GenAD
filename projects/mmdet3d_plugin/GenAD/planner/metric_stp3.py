@@ -77,6 +77,7 @@ class PlanningMetric():
             gt_agent_boxes,
             gt_agent_feats
         ):
+        # 调用 get_birds_eye_view_label 获取鸟瞰图视角下的标签
         segmentation_np, pedestrian_np = self.get_birds_eye_view_label(gt_agent_boxes,gt_agent_feats)
         segmentation = torch.from_numpy(segmentation_np).long().unsqueeze(0)
         pedestrian = torch.from_numpy(pedestrian_np).long().unsqueeze(0)
@@ -112,7 +113,9 @@ class PlanningMetric():
         gt_agent_fut_trajs = np.cumsum(gt_agent_fut_trajs, axis=1)
         gt_agent_fut_yaw = np.cumsum(gt_agent_fut_yaw, axis=1)
 
+        # 将实例的yaw角度转换到雷达坐标系
         gt_agent_boxes[:,6:7] = -1*(gt_agent_boxes[:,6:7] + np.pi/2) # NOTE: convert yaw to lidar frame
+        # 计算累积轨迹和朝向
         gt_agent_fut_trajs = gt_agent_fut_trajs + gt_agent_boxes[:, np.newaxis, 0:2]
         gt_agent_fut_yaw = gt_agent_fut_yaw + gt_agent_boxes[:, np.newaxis, 6:7]
         
@@ -126,9 +129,11 @@ class PlanningMetric():
                     y_a = gt_agent_fut_trajs[i, t, 1]
                     yaw_a = gt_agent_fut_yaw[i, t, 0]
                     param = [x_a,y_a,yaw_a,agent_length, agent_width]
+                    # segmentation仅包含车辆类别的占用情况
                     if (category_index in self.category_index['vehicle']):
                         poly_region = self._get_poly_region_in_image(param)
                         cv2.fillPoly(segmentation[t], [poly_region], 1.0)
+                    # pedestrian仅包含行人类别的占用情况
                     if (category_index in self.category_index['human']):
                         poly_region = self._get_poly_region_in_image(param)
                         cv2.fillPoly(pedestrian[t], [poly_region], 1.0)
@@ -261,26 +266,31 @@ class PlanningMetric():
         # trajs = trajs * torch.tensor([-1, 1], device=trajs.device)
         # gt_trajs = gt_trajs * torch.tensor([-1, 1], device=gt_trajs.device)
 
-        obj_coll_sum = torch.zeros(n_future, device=segmentation.device)
-        obj_box_coll_sum = torch.zeros(n_future, device=segmentation.device)
+        obj_coll_sum = torch.zeros(n_future, device=segmentation.device)            # 点碰撞，检查轨迹上的每个点是否与障碍物发生碰撞
+        obj_box_coll_sum = torch.zeros(n_future, device=segmentation.device)        # 框碰撞，考虑车辆的实际尺寸
 
         for i in range(B):
+            # 计算真实轨迹的碰撞情况
             gt_box_coll = self.evaluate_single_coll(gt_trajs[i], segmentation[i], input_gt=True)
 
+            # 将预测轨迹从lidar坐标系转换到图像坐标系
             xx, yy = trajs[i,:,0], trajs[i, :, 1]
             # lidar系下的轨迹转换到图片坐标系下
             xi = ((-self.bx[0]/2 - yy) / self.dx[0]).long()
             yi = ((-self.bx[1]/2 + xx) / self.dx[1]).long()
 
+            # 检查点是否在图像范围内且不与真实轨迹碰撞
             m1 = torch.logical_and(
                 torch.logical_and(xi >= 0, xi < self.bev_dimension[0]),
                 torch.logical_and(yi >= 0, yi < self.bev_dimension[1]),
             ).to(gt_box_coll.device)
             m1 = torch.logical_and(m1, torch.logical_not(gt_box_coll))
 
+            # 计算碰撞点的数量
             ti = torch.arange(n_future)
             obj_coll_sum[ti[m1]] += segmentation[i, ti[m1], xi[m1], yi[m1]].long()
 
+            # 计算框碰撞情况
             m2 = torch.logical_not(gt_box_coll)
             box_coll = self.evaluate_single_coll(trajs[i], segmentation[i], input_gt=False).to(ti.device)
             obj_box_coll_sum[ti[m2]] += (box_coll[ti[m2]]).long()

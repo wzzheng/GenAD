@@ -1,4 +1,4 @@
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=1)        # 每训练1个epoch保存一次模型检查点
 # yapf:disable push
 # By default we use textlogger hook and tensorboard
 # For more loggers see

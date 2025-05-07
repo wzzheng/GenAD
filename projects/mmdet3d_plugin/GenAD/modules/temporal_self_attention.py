@@ -90,12 +90,14 @@ class TemporalSelfAttention(BaseModule):
         self.num_heads = num_heads
         self.num_points = num_points
         self.num_bev_queue = num_bev_queue
+        # 利用value生成采样点的offset：256*2——>2*8*1*4*2
         self.sampling_offsets = nn.Linear(
             embed_dims*self.num_bev_queue, num_bev_queue*num_heads * num_levels * num_points * 2)
+        # 利用value生成采样点的权重：256*2——>2*8*1*4
         self.attention_weights = nn.Linear(embed_dims*self.num_bev_queue,
                                            num_bev_queue*num_heads * num_levels * num_points)
-        self.value_proj = nn.Linear(embed_dims, embed_dims)
-        self.output_proj = nn.Linear(embed_dims, embed_dims)
+        self.value_proj = nn.Linear(embed_dims, embed_dims)     # value的线性映射层
+        self.output_proj = nn.Linear(embed_dims, embed_dims)    # 输出的线性映射层
         self.init_weights()
 
     def init_weights(self):
@@ -113,6 +115,7 @@ class TemporalSelfAttention(BaseModule):
         for i in range(self.num_points):
             grid_init[:, :, i, :] *= i + 1
 
+        # 注意sampling_offsets.bias的初始化很有意思，相当于在参考点周围撒了一圈采样点
         self.sampling_offsets.bias.data = grid_init.view(-1)
         constant_init(self.attention_weights, val=0., bias=0.)
         xavier_init(self.value_proj, distribution='uniform', bias=0.)
@@ -215,6 +218,7 @@ class TemporalSelfAttention(BaseModule):
         sampling_offsets = sampling_offsets.permute(0, 3, 1, 2, 4, 5, 6)\
             .reshape(bs*self.num_bev_queue, num_query, self.num_heads, self.num_levels, self.num_points, 2)
 
+        # 真正要去采样的坐标 = “参考点位置 + 偏移量”
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.stack(
                 [spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)

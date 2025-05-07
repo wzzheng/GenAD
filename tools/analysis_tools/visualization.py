@@ -36,106 +36,110 @@ cams = ['CAM_FRONT',
  'CAM_FRONT_LEFT']
 
 
-def render_annotation(
-        anntoken: str,
-        margin: float = 10,
-        view: np.ndarray = np.eye(4),
-        box_vis_level: BoxVisibility = BoxVisibility.ANY,
-        out_path: str = 'render.png',
-        extra_info: bool = False) -> None:
-    """
-    Render selected annotation.
-    :param anntoken: Sample_annotation token.
-    :param margin: How many meters in each direction to include in LIDAR view.
-    :param view: LIDAR view point.
-    :param box_vis_level: If sample_data is an image, this sets required visibility for boxes.
-    :param out_path: Optional path to save the rendered figure to disk.
-    :param extra_info: Whether to render extra information below camera view.
-    """
-    ann_record = nusc.get('sample_annotation', anntoken)
-    sample_record = nusc.get('sample', ann_record['sample_token'])
-    assert 'LIDAR_TOP' in sample_record['data'].keys(), 'Error: No LIDAR_TOP in data, unable to render.'
+# nuscenes-devkit官方提供的函数，参考nuscenes-devkit/python-sdk/nuscenes/nuscenes.py中NuScenesExplorer类的render_annotation()函数
+# 获取注释记录和样本记录/找出在哪些相机中物体是可见的/渲染激光雷达视图和相机视图
+# （实际上在这个代码中没有被使用）
+# def render_annotation(
+#         anntoken: str,
+#         margin: float = 10,
+#         view: np.ndarray = np.eye(4),
+#         box_vis_level: BoxVisibility = BoxVisibility.ANY,
+#         out_path: str = 'render.png',
+#         extra_info: bool = False) -> None:
+#     """
+#     Render selected annotation.
+#     :param anntoken: Sample_annotation token.
+#     :param margin: How many meters in each direction to include in LIDAR view.
+#     :param view: LIDAR view point.
+#     :param box_vis_level: If sample_data is an image, this sets required visibility for boxes.
+#     :param out_path: Optional path to save the rendered figure to disk.
+#     :param extra_info: Whether to render extra information below camera view.
+#     """
+#     ann_record = nusc.get('sample_annotation', anntoken)        # 从sample_annotation.json中获取anntoken的记录
+#     sample_record = nusc.get('sample', ann_record['sample_token'])
+#     assert 'LIDAR_TOP' in sample_record['data'].keys(), 'Error: No LIDAR_TOP in data, unable to render.'
 
-    # Figure out which camera the object is fully visible in (this may return nothing).
-    boxes, cam = [], []
-    cams = [key for key in sample_record['data'].keys() if 'CAM' in key]
-    all_bboxes = []
-    select_cams = []
-    for cam in cams:
-        _, boxes, _ = nusc.get_sample_data(sample_record['data'][cam], box_vis_level=box_vis_level,
-                                           selected_anntokens=[anntoken])
-        if len(boxes) > 0:
-            all_bboxes.append(boxes)
-            select_cams.append(cam)
-            # We found an image that matches. Let's abort.
-    # assert len(boxes) > 0, 'Error: Could not find image where annotation is visible. ' \
-    #                      'Try using e.g. BoxVisibility.ANY.'
-    # assert len(boxes) < 2, 'Error: Found multiple annotations. Something is wrong!'
+#     # Figure out which camera the object is fully visible in (this may return nothing).
+#     boxes, cam = [], []
+#     cams = [key for key in sample_record['data'].keys() if 'CAM' in key]
+#     all_bboxes = []
+#     select_cams = []
+#     for cam in cams:
+#         _, boxes, _ = nusc.get_sample_data(sample_record['data'][cam], box_vis_level=box_vis_level,
+#                                            selected_anntokens=[anntoken])
+#         if len(boxes) > 0:
+#             all_bboxes.append(boxes)
+#             select_cams.append(cam)
+#             # We found an image that matches. Let's abort.
+#     # assert len(boxes) > 0, 'Error: Could not find image where annotation is visible. ' \
+#     #                      'Try using e.g. BoxVisibility.ANY.'
+#     # assert len(boxes) < 2, 'Error: Found multiple annotations. Something is wrong!'
 
-    num_cam = len(all_bboxes)
+#     num_cam = len(all_bboxes)
 
-    fig, axes = plt.subplots(1, num_cam + 1, figsize=(18, 9))
-    select_cams = [sample_record['data'][cam] for cam in select_cams]
-    print('bbox in cams:', select_cams)
-    # Plot LIDAR view.
-    lidar = sample_record['data']['LIDAR_TOP']
-    data_path, boxes, camera_intrinsic = nusc.get_sample_data(lidar, selected_anntokens=[anntoken])
-    LidarPointCloud.from_file(data_path).render_height(axes[0], view=view)
-    for box in boxes:
-        c = np.array(get_color(box.name)) / 255.0
-        box.render(axes[0], view=view, colors=(c, c, c))
-        corners = view_points(boxes[0].corners(), view, False)[:2, :]
-        axes[0].set_xlim([np.min(corners[0, :]) - margin, np.max(corners[0, :]) + margin])
-        axes[0].set_ylim([np.min(corners[1, :]) - margin, np.max(corners[1, :]) + margin])
-        axes[0].axis('off')
-        axes[0].set_aspect('equal')
+#     fig, axes = plt.subplots(1, num_cam + 1, figsize=(18, 9))
+#     select_cams = [sample_record['data'][cam] for cam in select_cams]
+#     print('bbox in cams:', select_cams)
+#     # Plot LIDAR view.
+#     lidar = sample_record['data']['LIDAR_TOP']
+#     data_path, boxes, camera_intrinsic = nusc.get_sample_data(lidar, selected_anntokens=[anntoken])
+#     LidarPointCloud.from_file(data_path).render_height(axes[0], view=view)
+#     for box in boxes:
+#         c = np.array(get_color(box.name)) / 255.0
+#         box.render(axes[0], view=view, colors=(c, c, c))
+#         corners = view_points(boxes[0].corners(), view, False)[:2, :]
+#         axes[0].set_xlim([np.min(corners[0, :]) - margin, np.max(corners[0, :]) + margin])
+#         axes[0].set_ylim([np.min(corners[1, :]) - margin, np.max(corners[1, :]) + margin])
+#         axes[0].axis('off')
+#         axes[0].set_aspect('equal')
 
-    # Plot CAMERA view.
-    for i in range(1, num_cam + 1):
-        cam = select_cams[i - 1]
-        data_path, boxes, camera_intrinsic = nusc.get_sample_data(cam, selected_anntokens=[anntoken])
-        im = Image.open(data_path)
-        axes[i].imshow(im)
-        axes[i].set_title(nusc.get('sample_data', cam)['channel'])
-        axes[i].axis('off')
-        axes[i].set_aspect('equal')
-        for box in boxes:
-            c = np.array(get_color(box.name)) / 255.0
-            box.render(axes[i], view=camera_intrinsic, normalize=True, colors=(c, c, c))
+#     # Plot CAMERA view.
+#     for i in range(1, num_cam + 1):
+#         cam = select_cams[i - 1]
+#         data_path, boxes, camera_intrinsic = nusc.get_sample_data(cam, selected_anntokens=[anntoken])
+#         im = Image.open(data_path)
+#         axes[i].imshow(im)
+#         axes[i].set_title(nusc.get('sample_data', cam)['channel'])
+#         axes[i].axis('off')
+#         axes[i].set_aspect('equal')
+#         for box in boxes:
+#             c = np.array(get_color(box.name)) / 255.0
+#             box.render(axes[i], view=camera_intrinsic, normalize=True, colors=(c, c, c))
 
-        # Print extra information about the annotation below the camera view.
-        axes[i].set_xlim(0, im.size[0])
-        axes[i].set_ylim(im.size[1], 0)
+#         # Print extra information about the annotation below the camera view.
+#         axes[i].set_xlim(0, im.size[0])
+#         axes[i].set_ylim(im.size[1], 0)
 
-    if extra_info:
-        rcParams['font.family'] = 'monospace'
+#     if extra_info:
+#         rcParams['font.family'] = 'monospace'
 
-        w, l, h = ann_record['size']
-        category = ann_record['category_name']
-        lidar_points = ann_record['num_lidar_pts']
-        radar_points = ann_record['num_radar_pts']
+#         w, l, h = ann_record['size']
+#         category = ann_record['category_name']
+#         lidar_points = ann_record['num_lidar_pts']
+#         radar_points = ann_record['num_radar_pts']
 
-        sample_data_record = nusc.get('sample_data', sample_record['data']['LIDAR_TOP'])
-        pose_record = nusc.get('ego_pose', sample_data_record['ego_pose_token'])
-        dist = np.linalg.norm(np.array(pose_record['translation']) - np.array(ann_record['translation']))
+#         sample_data_record = nusc.get('sample_data', sample_record['data']['LIDAR_TOP'])
+#         pose_record = nusc.get('ego_pose', sample_data_record['ego_pose_token'])
+#         dist = np.linalg.norm(np.array(pose_record['translation']) - np.array(ann_record['translation']))
 
-        information = ' \n'.join(['category: {}'.format(category),
-                                  '',
-                                  '# lidar points: {0:>4}'.format(lidar_points),
-                                  '# radar points: {0:>4}'.format(radar_points),
-                                  '',
-                                  'distance: {:>7.3f}m'.format(dist),
-                                  '',
-                                  'width:  {:>7.3f}m'.format(w),
-                                  'length: {:>7.3f}m'.format(l),
-                                  'height: {:>7.3f}m'.format(h)])
+#         information = ' \n'.join(['category: {}'.format(category),
+#                                   '',
+#                                   '# lidar points: {0:>4}'.format(lidar_points),
+#                                   '# radar points: {0:>4}'.format(radar_points),
+#                                   '',
+#                                   'distance: {:>7.3f}m'.format(dist),
+#                                   '',
+#                                   'width:  {:>7.3f}m'.format(w),
+#                                   'length: {:>7.3f}m'.format(l),
+#                                   'height: {:>7.3f}m'.format(h)])
 
-        plt.annotate(information, (0, 0), (0, -20), xycoords='axes fraction', textcoords='offset points', va='top')
+#         plt.annotate(information, (0, 0), (0, -20), xycoords='axes fraction', textcoords='offset points', va='top')
 
-    if out_path is not None:
-        plt.savefig(out_path)
+#     if out_path is not None:
+#         plt.savefig(out_path)
 
-
+# nuscenes-devkit官方提供的函数，参考nuscenes-devkit/python-sdk/nuscenes/nuscenes.py中NuScenes类的get_sample_data()函数
+# 获取与样本数据关联的所有注释，并将其转换到当前传感器的坐标系中
 def get_sample_data(sample_data_token: str,
                     box_vis_level: BoxVisibility = BoxVisibility.ANY,
                     selected_anntokens=None,
@@ -260,7 +264,7 @@ def get_predicted_data(sample_data_token: str,
 
     return data_path, box_list, cam_intrinsic
 
-
+# 处理激光雷达渲染，将地面真值(ground truth)和预测结果的边界框列表转换为可视化
 def lidiar_render(sample_token, data, out_path=None, out_name=None, traj_use_perstep_offset=True):
     bbox_gt_list = []
     bbox_pred_list = []
@@ -317,38 +321,41 @@ def lidiar_render(sample_token, data, out_path=None, out_name=None, traj_use_per
     visualize_sample(nusc, sample_token, gt_annotations, pred_annotations,
                      savepath=out_path, traj_use_perstep_offset=traj_use_perstep_offset, pred_data=data)
 
+# 修改自nuscenes-devkit官方提供的函数，参考python-sdk/nuscenes/utils/color_map.py中get_colormap()函数
+# 根据类别名称返回默认颜色，用于可视化不同类型的物体
+# （实际上在这个代码中没有被使用）
+# def get_color(category_name: str):
+#     """
+#     Provides the default colors based on the category names.
+#     This method works for the general nuScenes categories, as well as the nuScenes detection categories.
+#     """
+#     a = ['noise', 'animal', 'human.pedestrian.adult', 'human.pedestrian.child', 'human.pedestrian.construction_worker',
+#      'human.pedestrian.personal_mobility', 'human.pedestrian.police_officer', 'human.pedestrian.stroller',
+#      'human.pedestrian.wheelchair', 'movable_object.barrier', 'movable_object.debris',
+#      'movable_object.pushable_pullable', 'movable_object.trafficcone', 'static_object.bicycle_rack', 'vehicle.bicycle',
+#      'vehicle.bus.bendy', 'vehicle.bus.rigid', 'vehicle.car', 'vehicle.construction', 'vehicle.emergency.ambulance',
+#      'vehicle.emergency.police', 'vehicle.motorcycle', 'vehicle.trailer', 'vehicle.truck', 'flat.driveable_surface',
+#      'flat.other', 'flat.sidewalk', 'flat.terrain', 'static.manmade', 'static.other', 'static.vegetation',
+#      'vehicle.ego']
+#     class_names = [
+#         'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+#         'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+#     ]
+#     #print(category_name)
+#     if category_name == 'bicycle':
+#         return nusc.colormap['vehicle.bicycle']
+#     elif category_name == 'construction_vehicle':
+#         return nusc.colormap['vehicle.construction']
+#     elif category_name == 'traffic_cone':
+#         return nusc.colormap['movable_object.trafficcone']
 
-def get_color(category_name: str):
-    """
-    Provides the default colors based on the category names.
-    This method works for the general nuScenes categories, as well as the nuScenes detection categories.
-    """
-    a = ['noise', 'animal', 'human.pedestrian.adult', 'human.pedestrian.child', 'human.pedestrian.construction_worker',
-     'human.pedestrian.personal_mobility', 'human.pedestrian.police_officer', 'human.pedestrian.stroller',
-     'human.pedestrian.wheelchair', 'movable_object.barrier', 'movable_object.debris',
-     'movable_object.pushable_pullable', 'movable_object.trafficcone', 'static_object.bicycle_rack', 'vehicle.bicycle',
-     'vehicle.bus.bendy', 'vehicle.bus.rigid', 'vehicle.car', 'vehicle.construction', 'vehicle.emergency.ambulance',
-     'vehicle.emergency.police', 'vehicle.motorcycle', 'vehicle.trailer', 'vehicle.truck', 'flat.driveable_surface',
-     'flat.other', 'flat.sidewalk', 'flat.terrain', 'static.manmade', 'static.other', 'static.vegetation',
-     'vehicle.ego']
-    class_names = [
-        'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
-        'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
-    ]
-    #print(category_name)
-    if category_name == 'bicycle':
-        return nusc.colormap['vehicle.bicycle']
-    elif category_name == 'construction_vehicle':
-        return nusc.colormap['vehicle.construction']
-    elif category_name == 'traffic_cone':
-        return nusc.colormap['movable_object.trafficcone']
-
-    for key in nusc.colormap.keys():
-        if category_name in key:
-            return nusc.colormap[key]
-    return [0, 0, 0]
+#     for key in nusc.colormap.keys():
+#         if category_name in key:
+#             return nusc.colormap[key]
+#     return [0, 0, 0]
 
 # TODO: whether to rotate traj
+# 将边界框从全局坐标转换到车辆传感器坐标系
 def boxes_to_sensor(boxes: List[EvalBox], pose_record: Dict, cs_record: Dict):
     """
     Map boxes from global coordinates to the vehicle's sensor coordinate system.
@@ -374,7 +381,7 @@ def boxes_to_sensor(boxes: List[EvalBox], pose_record: Dict, cs_record: Dict):
 
     return boxes_out
 
-
+# 获取物体的未来轨迹坐标，用于轨迹预测可视化
 def get_gt_fut_trajs(nusc: NuScenes,
                      anno,
                      cs_record,
@@ -422,69 +429,71 @@ def get_gt_fut_trajs(nusc: NuScenes,
 
     return gt_fut_trajs.reshape(-1).tolist(), gt_fut_masks.reshape(-1).tolist()
 
-def get_gt_vec_maps(
-    sample_token,
-    data_root='data/nuscenes/',
-    pc_range=[-15.0, -30.0, -4.0, 15.0, 30.0, 4.0],
-    padding_value=-10000,
-    map_classes=['divider', 'ped_crossing', 'boundary'],
-    map_fixed_ptsnum_per_line=20
-) -> None:
-    """
-    Get gt vec map for a given sample.
-    """
-    sample_rec = nusc.get('sample', sample_token)
-    sd_record = nusc.get('sample_data', sample_rec['data']['LIDAR_TOP'])
-    cs_record = nusc.get('calibrated_sensor', sd_record['calibrated_sensor_token'])
-    pose_record = nusc.get('ego_pose', sd_record['ego_pose_token'])
-    lidar2ego_translation = cs_record['translation'],
-    lidar2ego_rotation = cs_record['rotation'],
-    ego2global_translation = pose_record['translation'],
-    ego2global_rotation = pose_record['rotation'],
-    map_location = nusc.get('log', nusc.get('scene', sample_rec['scene_token'])['log_token'])['location']
+# 获取给定样本的地面真值向量地图，包括车道线、行人过街和边界等信息
+# （实际上在这个代码中没有被使用）
+# def get_gt_vec_maps(
+#     sample_token,
+#     data_root='data/nuscenes/',
+#     pc_range=[-15.0, -30.0, -4.0, 15.0, 30.0, 4.0],
+#     padding_value=-10000,
+#     map_classes=['divider', 'ped_crossing', 'boundary'],
+#     map_fixed_ptsnum_per_line=20
+# ) -> None:
+#     """
+#     Get gt vec map for a given sample.
+#     """
+#     sample_rec = nusc.get('sample', sample_token)
+#     sd_record = nusc.get('sample_data', sample_rec['data']['LIDAR_TOP'])
+#     cs_record = nusc.get('calibrated_sensor', sd_record['calibrated_sensor_token'])
+#     pose_record = nusc.get('ego_pose', sd_record['ego_pose_token'])
+#     lidar2ego_translation = cs_record['translation'],
+#     lidar2ego_rotation = cs_record['rotation'],
+#     ego2global_translation = pose_record['translation'],
+#     ego2global_rotation = pose_record['rotation'],
+#     map_location = nusc.get('log', nusc.get('scene', sample_rec['scene_token'])['log_token'])['location']
 
-    lidar2ego = np.eye(4)
-    lidar2ego[:3,:3] = Quaternion(cs_record['rotation']).rotation_matrix
-    lidar2ego[:3, 3] = cs_record['translation']
-    ego2global = np.eye(4)
-    ego2global[:3,:3] = Quaternion(pose_record['rotation']).rotation_matrix
-    ego2global[:3, 3] = pose_record['translation']
-    lidar2global = ego2global @ lidar2ego
-    lidar2global_translation = list(lidar2global[:3,3])
-    lidar2global_rotation = list(Quaternion(matrix=lidar2global).q)
-    patch_h = pc_range[4]-pc_range[1]
-    patch_w = pc_range[3]-pc_range[0]
-    patch_size = (patch_h, patch_w)
+#     lidar2ego = np.eye(4)
+#     lidar2ego[:3,:3] = Quaternion(cs_record['rotation']).rotation_matrix
+#     lidar2ego[:3, 3] = cs_record['translation']
+#     ego2global = np.eye(4)
+#     ego2global[:3,:3] = Quaternion(pose_record['rotation']).rotation_matrix
+#     ego2global[:3, 3] = pose_record['translation']
+#     lidar2global = ego2global @ lidar2ego
+#     lidar2global_translation = list(lidar2global[:3,3])
+#     lidar2global_rotation = list(Quaternion(matrix=lidar2global).q)
+#     patch_h = pc_range[4]-pc_range[1]
+#     patch_w = pc_range[3]-pc_range[0]
+#     patch_size = (patch_h, patch_w)
 
-    vector_map = VectorizedLocalMap(data_root, patch_size=patch_size,
-                                    map_classes=map_classes, 
-                                    fixed_ptsnum_per_line=map_fixed_ptsnum_per_line,
-                                    padding_value=padding_value)
+#     vector_map = VectorizedLocalMap(data_root, patch_size=patch_size,
+#                                     map_classes=map_classes, 
+#                                     fixed_ptsnum_per_line=map_fixed_ptsnum_per_line,
+#                                     padding_value=padding_value)
 
 
-    anns_results = vector_map.gen_vectorized_samples(
-        map_location, lidar2global_translation, lidar2global_rotation
-    )
+#     anns_results = vector_map.gen_vectorized_samples(
+#         map_location, lidar2global_translation, lidar2global_rotation
+#     )
     
-    '''
-    anns_results, type: dict
-        'gt_vecs_pts_loc': list[num_vecs], vec with num_points*2 coordinates
-        'gt_vecs_pts_num': list[num_vecs], vec with num_points
-        'gt_vecs_label': list[num_vecs], vec with cls index
-    '''
-    gt_vecs_label = to_tensor(anns_results['gt_vecs_label'])
-    if isinstance(anns_results['gt_vecs_pts_loc'], LiDARInstanceLines):
-        gt_vecs_pts_loc = anns_results['gt_vecs_pts_loc']
-    else:
-        gt_vecs_pts_loc = to_tensor(anns_results['gt_vecs_pts_loc'])
-        try:
-            gt_vecs_pts_loc = gt_vecs_pts_loc.flatten(1).to(dtype=torch.float32)
-        except:
-            gt_vecs_pts_loc = gt_vecs_pts_loc
+#     '''
+#     anns_results, type: dict
+#         'gt_vecs_pts_loc': list[num_vecs], vec with num_points*2 coordinates
+#         'gt_vecs_pts_num': list[num_vecs], vec with num_points
+#         'gt_vecs_label': list[num_vecs], vec with cls index
+#     '''
+#     gt_vecs_label = to_tensor(anns_results['gt_vecs_label'])
+#     if isinstance(anns_results['gt_vecs_pts_loc'], LiDARInstanceLines):
+#         gt_vecs_pts_loc = anns_results['gt_vecs_pts_loc']
+#     else:
+#         gt_vecs_pts_loc = to_tensor(anns_results['gt_vecs_pts_loc'])
+#         try:
+#             gt_vecs_pts_loc = gt_vecs_pts_loc.flatten(1).to(dtype=torch.float32)
+#         except:
+#             gt_vecs_pts_loc = gt_vecs_pts_loc
     
-    return gt_vecs_pts_loc, gt_vecs_label
+#     return gt_vecs_pts_loc, gt_vecs_label
 
-
+# 从鸟瞰视图(BEV)可视化样本，包括注释和检测结果。这是最核心的可视化函数，显示地图、检测框和预测轨迹
 def visualize_sample(nusc: NuScenes,
                      sample_token: str,
                      gt_boxes: EvalBoxes,
@@ -561,12 +570,14 @@ def visualize_sample(nusc: NuScenes,
     # color_list = ['Blues', 'PiYG']
 
     for i, box in enumerate(boxes_est):
+        print("box.name:", box.name)
         if box.name in ignore_list:
             continue
         # Show only predictions with a high score.
         assert not np.isnan(box.score), 'Error: Box score cannot be NaN!'
         if box.name in ['pedestrian']:
             continue
+        print("box.center:", box.center)
         if box.score < conf_th or abs(box.center[0]) > 15 or abs(box.center[1]) > 30:
             continue
 
@@ -632,7 +643,11 @@ def visualize_sample(nusc: NuScenes,
     plt.savefig(savepath+'/bev_pred.png', bbox_inches='tight', dpi=200)
     plt.close()
 
-
+# 获取从一般传感器到顶部激光雷达的RT矩阵信息，用于坐标系转换
+# 车辆坐标(Ego Coordinate Frame)是与车辆绑定的坐标系统，随车辆一起移动和旋转
+# 顶部激光雷达对应的车辆坐标(Ego' Coordinate Frame)是车辆在采集顶部激光雷达数据时的坐标系
+# 产生两个不同车辆坐标系的主要原因是：微小时间差（0.x s）
+# （不同传感器的数据采集可能发生在不同的时间点，在这个时间差内，车辆可能已经移动或旋转。因此，当前传感器的车辆坐标系(ego)和顶部激光雷达采集时的车辆坐标系(ego')可能不完全重合
 def obtain_sensor2top(nusc,
                       sensor_token,
                       l2e_t,
@@ -664,6 +679,7 @@ def obtain_sensor2top(nusc,
     data_path = str(nusc.get_sample_data_path(sd_rec['token']))
     if os.getcwd() in data_path:  # path from lyftdataset is absolute path
         data_path = data_path.split(f'{os.getcwd()}/')[-1]  # relative path
+    # 数据整合
     sweep = {
         'data_path': data_path,
         'type': sensor_type,
@@ -682,10 +698,15 @@ def obtain_sensor2top(nusc,
 
     # obtain the RT from sensor to Top LiDAR
     # sweep->ego->global->ego'->lidar
+    # 传感器->全局
     l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
     e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
+    # l2e_r_mat, l2e_t   # 顶置LiDAR → Ego
+    # e2g_r_mat, e2g_t   # Ego → Global 
+    # 旋转矩阵计算
     R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
         np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+    # 平移矩阵计算
     T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ (
         np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
     T -= e2g_t @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
@@ -695,6 +716,8 @@ def obtain_sensor2top(nusc,
 
     return sensor2lidar_rotation, sensor2lidar_translation
 
+# 修改自nuscenes-devkit官方提供的函数，参考nuscenes-devkit/python-sdk/nuscenes/nuscenes.py中NuScenesExplorer类的render_sample_data()函数
+# 在坐标轴上渲染样本数据，调用lidiar_render函数进行实际渲染。
 def render_sample_data(
         sample_toekn: str,
         with_anns: bool = True,
@@ -755,30 +778,38 @@ def parse_args():
 
 
 if __name__ == '__main__':
+    # 初始化：解析参数
     args = parse_args()
+    # 初始化：加载推理结果
     inference_result_path = args.result_path
     out_path = args.save_path
-    bevformer_results = mmcv.load(inference_result_path)
+    bevformer_results = mmcv.load(inference_result_path)    # mmcv.load()加载BEVFormer模型的预测结果，然后获取所有样本的token列表
     sample_token_list = list(bevformer_results['results'].keys())
 
-    nusc = NuScenes(version='v1.0-trainval', dataroot='./data/nuscenes', verbose=True)
+    print("sample_token_list: ", sample_token_list)
+    nusc = NuScenes(version='v1.0-mini', dataroot='/mnt/kuebiko/users/qdeng/GenAD/data-mini/nuscenes', verbose=True)
     
     imgs = []
-    fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+    # 初始化：设置视频写入器
+    # fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')  # 使用其他的编解码器
     video_path = osp.join(out_path, 'tiny.mp4')
     video = cv2.VideoWriter(video_path, fourcc, 10, (2933, 800), True)
-    for id in tqdm(range(len(sample_token_list))):
+    print(f"Video writer created: {video.isOpened()}")
+
+    for id in tqdm(range(len(sample_token_list))):      # 样本处理循环
     # for id in tqdm(range(25)):
         #3025 1140
         # id = id + 3025
         mmcv.mkdir_or_exist(out_path)
-        render_sample_data(sample_token_list[id],
+        render_sample_data(sample_token_list[id],       # 渲染鸟瞰图(BEV)预测结果
                            pred_data=bevformer_results,
                            out_path=out_path)
         pred_path = osp.join(out_path, 'bev_pred.png')
-        pred_img = cv2.imread(pred_path)
-        os.remove(pred_path)
+        pred_img = cv2.imread(pred_path)                # 读取生成的BEV图像
+        # os.remove(pred_path)                            # 删除临时文件
 
+        # 获取当前处理的样本信息
         sample_token = sample_token_list[id]
         sample = nusc.get('sample', sample_token)
         # sample = data['results'][sample_token_list[0]][0]
@@ -792,13 +823,15 @@ if __name__ == '__main__':
         ]
 
         cam_imgs = []
-        for cam in cams:
+        for cam in cams:   # 循环处理每个摄像头
             sample_data_token = sample['data'][cam]
             sd_record = nusc.get('sample_data', sample_data_token)
             sensor_modality = sd_record['sensor_modality']
+            # if-elif 确认数据类型是相机，不处理激光雷达或雷达数据
             if sensor_modality in ['lidar', 'radar']:
                 assert False
             elif sensor_modality == 'camera':
+                # 从预测结果中提取3D边界框信息和相机内参，同时获取地面真值边界框
                 boxes = [Box(record['translation'], record['size'], Quaternion(record['rotation']),
                             name=record['detection_name'], token='predicted') for record in
                         bevformer_results['results'][sample_token]]
@@ -807,59 +840,79 @@ if __name__ == '__main__':
                                                                             pred_anns=boxes)
                 _, boxes_gt, _ = nusc.get_sample_data(sample_data_token, box_vis_level=BoxVisibility.ANY)
 
+                # 打开相机图像，创建图形和坐标轴来显示图像
                 data = Image.open(data_path)
- 
                 # Show image.
                 _, ax = plt.subplots(1, 1, figsize=(6, 12))
                 ax.imshow(data)
 
+                # 如果是前视相机，需要可视化规划轨迹，这部分代码涉及坐标转换和轨迹绘制
                 if cam == 'CAM_FRONT':
                     lidar_sd_record =  nusc.get('sample_data', sample['data']['LIDAR_TOP'])
                     lidar_cs_record = nusc.get('calibrated_sensor', lidar_sd_record['calibrated_sensor_token'])
-                    lidar_pose_record = nusc.get('ego_pose', lidar_sd_record['ego_pose_token'])
+                    lidar_pose_record = nusc.get('ego_pose', lidar_sd_record['ego_pose_token'])     # ego_pose记录了车辆在全局坐标系下的位置和朝向
 
                     # get plan traj [x,y,z,w] quaternion, w=1
                     # we set z=-1 to get points near the ground in lidar coord system
+                    # 获取规划命令和轨迹，将小于0.01的值设为0，然后计算累积和，转换为绝对轨迹点
                     plan_cmd = np.argmax(bevformer_results['plan_results'][sample_token][1][0,0,0])
                     plan_traj = bevformer_results['plan_results'][sample_token][0][plan_cmd]
+                    # plan_traj.shape-[6, 2]
                     plan_traj[abs(plan_traj) < 0.01] = 0.0
-                    plan_traj = plan_traj.cumsum(axis=0)
+                    plan_traj = plan_traj.cumsum(axis=0)        # 原始 plan_traj 是以相对位移（每步移动量）而非绝对坐标表示的，计算累积和后转换为绝对坐标
+                    print("plan_traj after cumsum: ", plan_traj.shape)
 
+                    # 将2D轨迹点转换为齐次坐标系下的3D轨迹点，设置z=-1（接近地面）和w=1
+                    # 设置z=-1的原因是为了将轨迹点放置在靠近地面的位置，以便后续进行投影变换
+                    # 设置w=1是齐次坐标的标准做法，这样便于后续进行投影变换。在齐次坐标系中，点 (x, y, z, 1) 对应于3D空间中的点 (x, y, z)。
                     plan_traj = np.concatenate((
-                        plan_traj[:, [0]],
-                        plan_traj[:, [1]],
-                        -1.0*np.ones((plan_traj.shape[0], 1)),
-                        np.ones((plan_traj.shape[0], 1)),
+                        plan_traj[:, [0]],                      # 提取所有轨迹点的x坐标，保持列向量形式
+                        plan_traj[:, [1]],                      # 提取所有轨迹点的y坐标，保持列向量形式
+                        -1.0*np.ones((plan_traj.shape[0], 1)),  # 创建一个与轨迹点数量相同的全-1列向量，作为z坐标
+                        np.ones((plan_traj.shape[0], 1)),       # 创建一个与轨迹点数量相同的全1列向量，作为齐次坐标的w分量
                     ), axis=1)
-                    # add the start point in lcf
-                    plan_traj = np.concatenate((np.zeros((1, plan_traj.shape[1])), plan_traj), axis=0)
+                    # plan_traj.shape-[6, 4]
+                    # add the start point in lcf(lidar coord frame)
+                    # lcf-x轴正方向为车辆前进方向，y轴正方向为车辆左侧，z轴正方向为车辆上方
+                    plan_traj = np.concatenate((np.zeros((1, plan_traj.shape[1])), plan_traj), axis=0)  # 沿着第1轴（列方向）连接这些向量
                     # plan_traj[0, :2] = 2*plan_traj[1, :2] - plan_traj[2, :2]
-                    plan_traj[0, 0] = 0.3
-                    plan_traj[0, 2] = -1.0
-                    plan_traj[0, 3] = 1.0
+                    # 添加起始点，设置起始点的x、z和w值
+                    plan_traj[0, 0] = 0.3       # 单位:m,轨迹的起始点从自车正前方稍偏移位置开始绘制
+                    plan_traj[0, 2] = -1.0      # 单位:m，贴近地面
+                    plan_traj[0, 3] = 1.0       # 无单位
+                    # plan_traj.shape-[7, 4]
 
-                    l2e_r = lidar_cs_record['rotation']
-                    l2e_t = lidar_cs_record['translation']
-                    e2g_r = lidar_pose_record['rotation']
-                    e2g_t = lidar_pose_record['translation']
+                    # ！！！ 坐标转换！！！ # 
+                    # 获取激光雷达到车辆的旋转和平移，以及车辆到全局的旋转和平移，并转换四元数为旋转矩阵
+                    l2e_r = lidar_cs_record['rotation']         # 激光雷达到车辆的旋转（四元数）
+                    l2e_t = lidar_cs_record['translation']      # 激光雷达到车辆的平移（向量）
+                    e2g_r = lidar_pose_record['rotation']       # 车辆到全局的旋转（四元数）
+                    e2g_t = lidar_pose_record['translation']    # 车辆到全局的平移（向量）
+                    # 将四元数转换为旋转矩阵
                     l2e_r_mat = Quaternion(l2e_r).rotation_matrix
                     e2g_r_mat = Quaternion(e2g_r).rotation_matrix
+                    # 获取相机到激光雷达顶部的变换（旋转矩阵和平移向量）
                     s2l_r, s2l_t = obtain_sensor2top(nusc, sample_data_token, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, cam)
                     # obtain lidar to image transformation matrix
+                    # 计算激光雷达到相机的变换矩阵，首先求传感器到激光雷达变换的逆变换，然后构建4×4的RT矩阵
                     lidar2cam_r = np.linalg.inv(s2l_r)
                     lidar2cam_t = s2l_t @ lidar2cam_r.T
                     lidar2cam_rt = np.eye(4)
                     lidar2cam_rt[:3, :3] = lidar2cam_r.T
                     lidar2cam_rt[3, :3] = -lidar2cam_t
+                    # 将相机内参矩阵扩展为4×4矩阵，并与激光雷达到相机的变换矩阵相乘，得到激光雷达到图像的投影矩阵
                     viewpad = np.eye(4)
                     viewpad[:camera_intrinsic.shape[0], :camera_intrinsic.shape[1]] = camera_intrinsic
                     lidar2img_rt = (viewpad @ lidar2cam_rt.T)
+                    # 使用投影矩阵将3D轨迹点投影到2D图像平面，透视除法得到像素坐标，并转置回原来的形状
                     plan_traj = lidar2img_rt @ plan_traj.T
                     plan_traj = plan_traj[0:2, ...] / np.maximum(
                         plan_traj[2:3, ...], np.ones_like(plan_traj[2:3, ...]) * 1e-5)
                     plan_traj = plan_traj.T
+                    # 将轨迹点组织成连续线段的形式（起点，终点）
                     plan_traj = np.stack((plan_traj[:-1], plan_traj[1:]), axis=1)
 
+                    # 将每个轨迹线段细分为50个小段，便于后续设置颜色渐变效果
                     plan_vecs = None
                     for i in range(plan_traj.shape[0]):
                         plan_vec_i = plan_traj[i]
@@ -871,13 +924,14 @@ if __name__ == '__main__':
                             plan_vecs = xy
                         else:
                             plan_vecs = np.concatenate((plan_vecs, xy), axis=0)
-
+                    # 创建颜色映射，使用余弦函数生成渐变值，创建线段集合并添加到图上显示
                     cmap = 'summer'
                     y = np.sin(np.linspace(1/2*np.pi, 3/2*np.pi, 301))
                     colors = color_map(y[:-1], cmap)
                     line_segments = LineCollection(plan_vecs, colors=colors, linewidths=2, linestyles='solid', cmap=cmap)
                     ax.add_collection(line_segments)
 
+                # save images
                 ax.set_xlim(0, data.size[0])
                 ax.set_ylim(data.size[1], 0)
                 ax.axis('off')
@@ -887,6 +941,7 @@ if __name__ == '__main__':
                 plt.close()
 
                 # Load boxes and image.
+                # 在图像上添加相机标注文本
                 data_path = osp.join(out_path, f'{cam}_PRED.png')
                 cam_img = cv2.imread(data_path)
                 lw = 6
@@ -904,7 +959,9 @@ if __name__ == '__main__':
                 cam_imgs.append(cam_img)
             else:
                 raise ValueError("Error: Unknown sensor modality!")
-
+        
+        # Process planning command
+        # 处理规划命令，为BEV图像添加边框
         plan_cmd = np.argmax(bevformer_results['plan_results'][sample_token][1][0,0,0])
         cmd_list = ['Turn Right', 'Turn Left', 'Go Straight']
         plan_cmd_str = cmd_list[plan_cmd]
@@ -925,6 +982,8 @@ if __name__ == '__main__':
         # pred_img = cv2.putText(pred_img, plan_cmd_str, (20, 770), font,
         #                 fontScale, color, thickness, cv2.LINE_AA)
         
+        # Concatenate all images for final visualization
+        # 将所有图像组合成最终可视化结果，并写入视频
         sample_img = pred_img
         cam_img_top = cv2.hconcat([cam_imgs[0], cam_imgs[1], cam_imgs[2]])
         cam_img_down = cv2.hconcat([cam_imgs[3], cam_imgs[4], cam_imgs[5]])
