@@ -4,7 +4,7 @@
 
 > GenAD: Generative End-to-End Autonomous Driving
 
-> [Wenzhao Zheng](https://wzzheng.net/)\*, Ruiqi Song\*, [Xianda Guo](https://scholar.google.com/citations?user=jPvOqgYAAAAJ)\* $\dagger$, Chenming Zhang, [Long Chen](https://scholar.google.com/citations?user=jzvXnkcAAAAJ)$\dagger$
+> [Wenzhao Zheng](https://wzzheng.net/)\*, [Ruiqi Song](https://github.com/ruiqi-song)\*, [Xianda Guo](https://scholar.google.com/citations?user=jPvOqgYAAAAJ)\* $\dagger$, Chenming Zhang, [Long Chen](https://scholar.google.com/citations?user=jzvXnkcAAAAJ)$\dagger$
 
 \* Equal contributions $\dagger$ Corresponding authors
 
