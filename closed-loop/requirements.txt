@@ -1,0 +1,48 @@
+cython
+numba==0.48.0 # In order to speed up
+addict
+packaging
+Pillow
+matplotlib
+regex;sys_platform=='win32'
+pycocotools; platform_system == "Linux"
+pycocotools-windows; platform_system == "Windows"
+prettytable
+six
+terminaltables
+lyft_dataset_sdk
+nuscenes-devkit
+scikit-image
+tensorboard
+cityscapesscripts
+imagecorruptions
+scipy
+scikit-learn
+open3d
+networkx
+ipython
+opencv-python
+seaborn
+numpy==1.20.0 # In order to adapt numba
+# metric related
+einops
+casadi
+torchmetrics
+motmetrics==1.1.3 # Fixed
+trimesh
+# pytest related
+pytest
+pytest-cov
+pytest-runner
+yapf==0.40.1
+flake8
+trimesh==2.35.39
+similaritymeasures
+laspy==2.5.0
+lazrs==0.5.3
+py-trees==0.8.3
+simple_watchdog_timer
+transforms3d
+tabulate
+ephem
+dictor
