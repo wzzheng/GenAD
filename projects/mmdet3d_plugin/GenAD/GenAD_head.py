@@ -2029,3 +2029,4 @@ class GenADHead(DETRHead):
         all_target_gt = torch.cat([agent_targets_gt, ego_target_gt], dim=1)  # [bz, 301, 12]
 
         return all_target_gt
+

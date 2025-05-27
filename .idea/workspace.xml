@@ -1,9 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="95ef1cb4-c288-4ae4-9b14-c839ab3a6006" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/projects/mmdet3d_plugin/GenAD/GenAD_head.py" beforeDir="false" afterPath="$PROJECT_DIR$/projects/mmdet3d_plugin/GenAD/GenAD_head.py" afterDir="false" />
-    </list>
+    <list default="true" id="95ef1cb4-c288-4ae4-9b14-c839ab3a6006" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -25,7 +23,7 @@
     <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
     <property name="WebServerToolWindowFactoryState" value="true" />
     <property name="last_opened_file_path" value="$PROJECT_DIR$" />
-    <property name="settings.editor.selected.configurable" value="com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable" />
+    <property name="settings.editor.selected.configurable" value="preferences.fileTypes" />
   </component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
@@ -35,7 +33,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1748312855349</updated>
-      <workItem from="1748312857135" duration="343000" />
+      <workItem from="1748312857135" duration="708000" />
     </task>
     <servers />
   </component>
